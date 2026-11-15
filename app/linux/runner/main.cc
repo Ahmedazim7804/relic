@@ -1,7 +1,11 @@
+#include <stdlib.h>
 #include "my_application.h"
 #include "single_instance.h"
 
 int main(int argc, char** argv) {
+  if (getenv("WAYLAND_DISPLAY") != nullptr) {
+    setenv("GDK_BACKEND", "x11", 0);
+  }
   // One Relic per vault. Losing this race is the normal way a second launch
   // ends: the running copy has already been asked to surface its window, so
   // this process has nothing left to do and exits successfully.
