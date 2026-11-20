@@ -23,8 +23,6 @@ import 'package:qr_flutter/qr_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../data/backup_file.dart';
-import '../data/voice_controller.dart';
-import 'voice_settings.dart';
 import '../data/crash_log.dart';
 import '../data/hotkeys.dart';
 import '../platform/input_injector.dart';
@@ -56,54 +54,28 @@ import '../widgets/relic_mark.dart';
 class SettingsView extends StatefulWidget {
   final VoidCallback onClose;
   final LocalDeskRepo repo;
-  final VoiceController? voice;
 
-  /// Open the connect flow (passphrase entry). Settings closes; the connect
-  /// surface takes over. Null-safe: if absent the Connect button is hidden.
   final VoidCallback? onConnect;
   final VoidCallback? onDisconnect;
 
-  /// Guided "switch account": disconnect, then re-open onboarding on the sign-in
-  /// step. Null hides the action.
   final VoidCallback? onSwitchAccount;
 
-  /// Run the shared post-connect step (show the recovery kit on a freshly created
-  /// vault, register the device) after an in-Settings self-host connect. The
-  /// self-host path connects inside the Settings modal, so it can't reach the
-  /// desktop shell's `_afterDesktopConnect` on its own. No-ops on an existing
-  /// vault or a cancelled dialog.
   final Future<void> Function()? onSelfHostPostConnect;
 
-  /// Open Stripe checkout for the Pro monthly plan — the device-cap dialog's
-  /// "Upgrade" action. Null omits the upgrade button in that dialog.
-  final Future<void> Function()? onUpgrade;
-
-  /// Rename THIS device's local label to keep captures in step with a rename
-  /// made from the devices list.
   final Future<void> Function(String label)? onRenameThisDevice;
 
-  /// A billing link (Manage plan / Upgrade checkout) just opened in the
-  /// browser. Desktop hides the window so the page isn't covered by it.
-  final VoidCallback? onBillingOpened;
-
-  /// Land directly on the Sync & account section (e.g. opened to link a device).
   final bool startOnSync;
-  final bool startOnVoice;
 
   const SettingsView({
     super.key,
     required this.onClose,
     required this.repo,
-    this.voice,
     this.onConnect,
     this.onDisconnect,
     this.onSwitchAccount,
     this.onSelfHostPostConnect,
-    this.onUpgrade,
     this.onRenameThisDevice,
-    this.onBillingOpened,
     this.startOnSync = false,
-    this.startOnVoice = false,
   });
   @override
   State<SettingsView> createState() => _SettingsViewState();
@@ -111,11 +83,7 @@ class SettingsView extends StatefulWidget {
 
 class _SettingsViewState extends State<SettingsView>
     with WidgetsBindingObserver {
-  late int _section = widget.startOnVoice && widget.voice != null
-      ? 6
-      : widget.startOnSync
-      ? 4
-      : 0;
+  late int _section = widget.startOnSync ? 4 : 0;
   List<(String, IconData)> get _sections => [
     ('General', LucideIcons.slidersHorizontal),
     ('Capture', LucideIcons.clipboard),
@@ -123,7 +91,6 @@ class _SettingsViewState extends State<SettingsView>
     ('Vault and storage', LucideIcons.vault),
     ('Sync and account', LucideIcons.userRound),
     ('About', LucideIcons.info),
-    if (widget.voice != null) ('Voice', LucideIcons.mic),
   ];
 
   // transient status line for the storage actions
@@ -146,11 +113,7 @@ class _SettingsViewState extends State<SettingsView>
   bool _updateFailed = false; // the check itself failed, ≠ "you're current"
   UpdateInfo? _updateAvailable;
 
-  // billing: lazily-loaded plan list + an in-flight guard for Upgrade/Manage,
-  // plus the last failure, shown inline under the billing row.
-  Future<List<BillingPlan>>? _plansFuture;
-  bool _billingBusy = false;
-  String? _billingError;
+
 
   // export-vault flow (storage pane)
   bool _exportConfirming = false;
@@ -476,8 +439,6 @@ class _SettingsViewState extends State<SettingsView>
   Widget _pane(RelicColors c) {
     final repo = widget.repo;
     switch (_section) {
-      case 6:
-        return VoiceSettings(voice: widget.voice!);
       case 0:
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -655,23 +616,10 @@ class _SettingsViewState extends State<SettingsView>
     final connected = widget.repo.syncEnabled;
     final acct = widget.repo.account;
     final selfHost = widget.repo.isSelfHost;
-    // Self-host shows a "Self-hosted" chip instead of the managed Plan + billing
-    // rows; cloud shows Plan (+ billing when applicable).
-    final showPlanRow = connected && (selfHost || acct != null);
-    final showBillingRow =
-        !selfHost && acct != null && _showBilling(acct.tier);
-    // Copies are already waiting behind the free ring: the way out belongs at
-    // the top of the section, not below five rows of device settings.
-    final ringFirst =
-        showBillingRow && acct.ringCapped && !storeSafeBuild;
-    // Null unless a ring is actually in force, and never on a store-safe
-    // build (the getter carries both rules).
-    final historyLine = acct?.historyLine;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _paneTitle(c, 'Sync and account', help: 'settings.sync'),
-        if (ringFirst) _row(c, _billingActions(c, acct.tier)),
         _row(
           c,
           Row(
@@ -847,9 +795,9 @@ class _SettingsViewState extends State<SettingsView>
                     onTap: () => _openSecurity(context)),
               ],
             ),
-            last: !showPlanRow,
+            last: !connected,
           ),
-        if (connected && selfHost)
+        if (connected)
           _row(
             c,
             Row(
@@ -867,47 +815,7 @@ class _SettingsViewState extends State<SettingsView>
               ],
             ),
             last: true,
-          )
-        else if (connected && acct != null) ...[
-          _row(
-            c,
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Plan',
-                        style: RelicTheme.sans(size: 13, color: c.text),
-                      ),
-                      // What the plan is doing to your history, in numbers.
-                      // Only a plan with a ring has anything to say, so paid
-                      // plans and self-hosted servers add nothing. Store-safe
-                      // builds skip it too: "waiting" implies a purchase.
-                      if (historyLine != null) ...[
-                        const SizedBox(height: 2),
-                        Text(
-                          historyLine,
-                          style:
-                              RelicTheme.sans(size: 11.5, color: c.textMuted),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-                Text(
-                  acct.tier,
-                  style: RelicTheme.mono(size: 12, color: c.textSecondary),
-                ),
-              ],
-            ),
-            last: !showBillingRow || ringFirst,
           ),
-          if (showBillingRow && !ringFirst)
-            _row(c, _billingActions(c, acct.tier), last: true),
-        ],
       ],
     );
   }
@@ -2379,129 +2287,6 @@ class _SettingsViewState extends State<SettingsView>
     }
   }
 
-  // --- billing (Upgrade / Manage) ---
-  bool _showBilling(String tier) =>
-      tier == 'Free' || tier == 'Pro' || tier == 'Max';
-
-  Future<List<BillingPlan>> _loadPlans() =>
-      _plansFuture ??= widget.repo.billingPlans();
-
-  Future<void> _openCheckout(String priceId, {String? source}) =>
-      _billingAction(() => widget.repo.checkoutUrl(priceId, source: source));
-
-  Future<void> _openPortal() => _billingAction(widget.repo.portalUrl);
-
-  /// Run a billing call with the busy guard and error surfacing: a failure
-  /// shows up inline under the billing row instead of dying silently.
-  Future<void> _billingAction(Future<String?> Function() link) async {
-    if (_billingBusy) return;
-    setState(() {
-      _billingBusy = true;
-      _billingError = null;
-    });
-    String? url, error;
-    try {
-      url = await link();
-      if (url == null) error = 'Billing is unavailable while sync is off.';
-    } on BillingException catch (e) {
-      error = e.message;
-    }
-    if (!mounted) return;
-    setState(() {
-      _billingBusy = false;
-      _billingError = error;
-    });
-    if (url != null) {
-      if (await _openUrl(url)) {
-        widget.onBillingOpened?.call();
-      } else if (mounted) {
-        setState(() => _billingError = 'Could not open your browser.');
-      }
-    }
-  }
-
-  Widget _billingActions(RelicColors c, String tier) {
-    final body = _billingBody(c, tier);
-    if (_billingError == null) return body;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        body,
-        const SizedBox(height: 6),
-        Text(
-          _billingError!,
-          style: RelicTheme.sans(size: 11.5, color: c.dangerText),
-        ),
-      ],
-    );
-  }
-
-  Widget _billingBody(RelicColors c, String tier) {
-    if (tier == 'Pro' || tier == 'Max') {
-      return Row(
-        children: [
-          Expanded(
-            child: Text(
-              'Manage your plan, payment method, invoices, or cancel.',
-              style: RelicTheme.sans(size: 11.5, color: c.textMuted),
-            ),
-          ),
-          const SizedBox(width: 16),
-          _btn(
-            c,
-            _billingBusy ? 'Opening…' : 'Manage',
-            LucideIcons.creditCard,
-            accent: true,
-            onTap: _billingBusy ? null : _openPortal,
-          ),
-        ],
-      );
-    }
-    // Free tier → show upgrade options pulled from the Worker. When copies are
-    // already waiting behind the ring, tag the checkout with that source so we
-    // learn which surface sold it.
-    final source =
-        widget.repo.account?.ringCapped == true ? 'ring_settings' : null;
-    return FutureBuilder<List<BillingPlan>>(
-      future: _loadPlans(),
-      builder: (ctx, snap) {
-        final plans = snap.data ?? const <BillingPlan>[];
-        if (plans.isEmpty) {
-          return Text(
-            'Upgrade for more storage and an unlimited vault.',
-            style: RelicTheme.sans(size: 11.5, color: c.textMuted),
-          );
-        }
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Upgrade: more storage, unlimited vault',
-              style: RelicTheme.sans(size: 13, color: c.text),
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                for (final p in plans)
-                  _btn(
-                    c,
-                    p.label,
-                    LucideIcons.zap,
-                    accent: p.tier == 'pro' && p.interval == 'month',
-                    onTap: _billingBusy
-                        ? null
-                        : () => _openCheckout(p.priceId, source: source),
-                  ),
-              ],
-            ),
-          ],
-        );
-      },
-    );
-  }
-
   Widget _aboutRow(RelicColors c, String k, String v, {bool last = false}) =>
       _row(
         c,
@@ -2526,7 +2311,6 @@ class _SettingsViewState extends State<SettingsView>
         masterKey: widget.repo.masterKey,
         accountId: widget.repo.supabaseUserId,
         onRenameThisDevice: widget.onRenameThisDevice,
-        onUpgrade: widget.onUpgrade,
       ),
     ));
   }

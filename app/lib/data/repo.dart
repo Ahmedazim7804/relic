@@ -116,38 +116,14 @@ SyncState? ringSyncState(AccountInfo? a) {
 /// flag too, so nobody gets two toasts in the same second.
 ///
 /// Lives here, away from the desktop shell, so the rule is testable on its own.
-String? ringNoticeBody(AccountInfo? a, String accountId, Set<String> sent) {
-  if (a == null || !a.ringCapped) return null;
-  final first = 'ring_notified_1:$accountId';
-  final hundred = 'ring_notified_100:$accountId';
-  if (a.evictedCount >= 100 && !sent.contains(hundred)) {
-    sent.add(hundred);
-    sent.add(first);
-    return '100 of your copies are now out of reach. Open Relic to keep them.';
-  }
-  if (a.evictedCount >= 1 && !sent.contains(first)) {
-    sent.add(first);
-    return 'Relic stopped showing your oldest copies. Open Relic to keep them.';
-  }
-  return null;
-}
+String? ringNoticeBody(AccountInfo? a, String accountId, Set<String> sent) => null;
 
-/// The one-time toast for the first copy the free plan refused as too large
-/// (413), or null for silence. Shares the persisted [sent] set with the ring
-/// notices, under its own key, so it shows once per account, ever.
 String? sizeCapNoticeBody(
   AccountInfo? a,
   int tooLarge,
   String accountId,
   Set<String> sent,
-) {
-  if (a == null || !a.isFree || tooLarge <= 0) return null;
-  final key = 'size_cap_notified:$accountId';
-  if (sent.contains(key)) return null;
-  sent.add(key);
-  return 'That copy is over 2 MB, so it stays on this computer. '
-      'Pro syncs items up to 100 MB.';
-}
+) => null;
 
 /// One purchasable plan, from the Worker `GET /stripe/plans`.
 class BillingPlan {

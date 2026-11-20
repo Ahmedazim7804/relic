@@ -57,19 +57,6 @@ if (-not $verMatch) { throw "Could not read 'version:' from pubspec.yaml" }
 $ver = $verMatch.Matches[0].Groups[1].Value
 Write-Host "==> Building Relic $ver" -ForegroundColor Cyan
 
-# 1a. Build the Windows Voice worker (PyInstaller one-dir bundle). It has to
-# exist before the Flutter build, because the Windows CMake install step copies
-# relic-voice\dist\relic-voice into the runner Release dir as voice\.
-if (-not $SkipVoice) {
-  $voiceBuild = Join-Path $repoDir "relic-voice\build.ps1"
-  if (-not (Test-Path $voiceBuild)) { throw "Voice build script not found: $voiceBuild" }
-  Write-Host "==> Building the Windows Voice worker ($voiceBuild)"
-  & powershell -NoProfile -ExecutionPolicy Bypass -File $voiceBuild
-  if ($LASTEXITCODE -ne 0) { throw "relic-voice build failed" }
-} else {
-  Write-Host "==> Skipping the Windows Voice worker (-SkipVoice)" -ForegroundColor DarkYellow
-}
-
 # 2. Flutter release build
 function Get-Flutter {
   foreach ($n in @("flutter", "flutter.bat")) {
@@ -83,14 +70,6 @@ function Get-Flutter {
 }
 $flutter = Get-Flutter
 if (-not $flutter) { throw "flutter not found on PATH or in known locations" }
-# The CMake install step copies the Voice bundle over whatever is already in
-# Release\voice and never deletes stale files, so a rebuild in the same tree
-# would ship leftovers from an earlier bundle. Start from an empty folder.
-$staleVoice = Join-Path $appDir "build\windows\x64\runner\Release\voice"
-if (Test-Path $staleVoice) {
-  Write-Host "==> Removing the previous Voice bundle from the build output"
-  Remove-Item -Recurse -Force $staleVoice
-}
 
 Write-Host "==> flutter build windows --release ($flutter)"
 & $flutter build windows --release
@@ -99,14 +78,6 @@ if ($LASTEXITCODE -ne 0) { throw "flutter build failed" }
 $releaseDir = Join-Path $appDir "build\windows\x64\runner\Release"
 $exe = Join-Path $releaseDir "relic_app.exe"
 if (-not (Test-Path $exe)) { throw "Build output not found: $exe" }
-
-# The CMake install step only copies the Voice bundle if it was built, and it
-# stays quiet when it wasn't. Fail here so Voice never goes missing silently.
-$voiceDir = Join-Path $releaseDir "voice"
-$voiceExe = Join-Path $voiceDir "relic-voice.exe"
-if (-not $SkipVoice -and -not (Test-Path $voiceExe)) {
-  throw "Voice bundle missing from the Flutter output; the CMake install step needs relic-voice/dist/relic-voice/relic-voice.exe"
-}
 
 # 2a. Bundle the VC++ runtime beside the exe. Flutter links it dynamically and
 # a clean Windows install does NOT have it (winget's validation VM caught all
@@ -254,17 +225,6 @@ Write-Host "==> Sign relic CLI"
 Invoke-Sign $cliExe
 Write-Host "==> Sign sift sidecar"
 Invoke-Sign $siftExe
-# Only our own binaries: the exe and the DLLs we built in _internal\native.
-# Everything else under _internal (python311.dll, onnxruntime, numpy) is
-# third-party and keeps its own signature.
-if (-not $SkipVoice) {
-  Write-Host "==> Sign Voice worker"
-  Invoke-Sign $voiceExe
-  $voiceNative = Join-Path $voiceDir "_internal\native"
-  foreach ($dll in Get-ChildItem -Path $voiceNative -Filter *.dll -File -ErrorAction SilentlyContinue) {
-    Invoke-Sign $dll.FullName
-  }
-}
 
 # 4. Inno Setup
 $iscc = Get-ISCC

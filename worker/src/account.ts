@@ -18,7 +18,6 @@
 import type { Env } from "./env";
 import type { Auth } from "./auth";
 import { json } from "./http";
-import { cancelSubscription } from "./stripe";
 
 // Delete every R2 object under a key prefix, in batches (R2 delete takes up to
 // 1000 keys; list is cursor-paginated).
@@ -175,21 +174,6 @@ export async function revokeSupabaseSessions(
 export async function deleteAccount(env: Env, auth: Auth): Promise<Response> {
   const acct = auth.account;
 
-  // 1) Stop billing first so nothing re-provisions mid-teardown. Best-effort.
-  const sub = await env.DB.prepare(
-    "SELECT stripe_subscription_id FROM subscriptions WHERE account_id = ?1",
-  ).bind(acct).first<{ stripe_subscription_id: string | null }>();
-  if (sub?.stripe_subscription_id) {
-    try {
-      await cancelSubscription(env, sub.stripe_subscription_id);
-    } catch {
-      /* best-effort; the D1 teardown below removes our mirror regardless */
-    }
-  }
-
-  // 2) R2: keyparams + relic envelopes + blobs all live under users/{acct}/.
-  // Share ciphertexts live under shares/<id> (public namespace) — delete them
-  // by the account's D1 rows before those rows are dropped below.
   const objects = await purgeR2Prefix(env, `users/${acct}/`);
   const shares = await env.DB.prepare(
     "SELECT id FROM shares WHERE account_id = ?1",

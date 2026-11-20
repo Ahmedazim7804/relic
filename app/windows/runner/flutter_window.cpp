@@ -5,7 +5,6 @@
 
 #include "flutter/generated_plugin_registrant.h"
 #include "native_gem_toast.h"
-#include "native_voice.h"
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
@@ -75,7 +74,6 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
-  if (auto voice = HandleNativeVoiceMessage(message, wparam, lparam)) return *voice;
   // Give Flutter, including plugins, an opportunity to handle window messages.
   if (flutter_controller_) {
     std::optional<LRESULT> result =

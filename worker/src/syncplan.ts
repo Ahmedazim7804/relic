@@ -26,7 +26,6 @@
 import type { Auth } from "./auth";
 import type { Env } from "./env";
 import { err, json } from "./http";
-import { type NudgeMail, sendNudgeMail } from "./stripe";
 
 export const SYNC_WEEK = 7 * 86400;
 export const SYNC_SWITCH_COOLDOWN = 7 * 86400;
@@ -121,8 +120,7 @@ export function forgetSyncPlan(account: string) {
  *  row all come back as "no limit". `appVersion` is the request's
  *  X-Relic-App-Version. */
 export async function readSyncPlan(env: Env, auth: Auth, appVersion?: string | null): Promise<SyncPlan> {
-  const since = syncPlanSince(env);
-  if (!syncPlanOn(env) || since === null || auth.tier !== "free") return NO_LIMIT;
+  return NO_LIMIT;
   const now = Math.floor(Date.now() / 1000);
   const hit = cache.get(auth.account);
   if (hit && hit.at > now - CACHE_S) return hit.plan;
@@ -207,17 +205,12 @@ export async function readSyncPlan(env: Env, auth: Auth, appVersion?: string | n
  *  that counts is ever paused (see SYNC_ACTIVE and callerCounts), and only when
  *  a different device that counts holds the slot. */
 export function isSyncPaused(
-  plan: SyncPlan,
-  device: string | undefined,
-  appVersion?: string | null,
-  now = Math.floor(Date.now() / 1000),
+  _plan: SyncPlan,
+  _device: string | undefined,
+  _appVersion?: string | null,
+  _now = Math.floor(Date.now() / 1000),
 ): boolean {
-  if (plan.syncUntil === null || now < plan.syncUntil) return false;
-  // A request that doesn't say which device it is can't be matched to a
-  // version, so it can't be shown why it stopped. Leave it syncing.
-  if (!device || !callerCounts(plan, device, appVersion)) return false;
-  if (!plan.syncDevice || device === plan.syncDevice) return false;
-  return true;
+  return false;
 }
 
 /** The 403 a paused device gets. Carries what the app needs to draw its
@@ -308,90 +301,4 @@ const SYNC_EMAIL_SCAN = 1000;
 ///
 /// Accounts given extra time at launch have a later sync_until, so they get
 /// theirs when that runs out, not on switch day.
-export async function syncWeekSweep(env: Env): Promise<void> {
-  // Checked before any query: self-host has no Resend key and the rule off.
-  const since = syncPlanSince(env);
-  if (!syncPlanOn(env) || since === null || !env.RESEND_API_KEY) return;
-  const now = Math.floor(Date.now() / 1000);
-  // Only accounts where a device is really paused: the kept device is settled
-  // and counts, and another device that counts (new enough app, seen within
-  // SYNC_ACTIVE) is in use. The SQL narrows to accounts with a kept device and
-  // some other recent device that reported a version; the version check itself
-  // runs here. Accounts it drops stay unstamped, so they are looked at again,
-  // in case an old app updates. random() keeps them from filling the scan
-  // window every run. No subscription check: an account that paid and lapsed
-  // is free again and is paused like any other.
-  const due = await env.DB.prepare(
-    `SELECT a.account_id, a.email,
-            (SELECT d.app_version FROM devices d
-              WHERE d.account_id = a.account_id AND d.device_id = a.sync_device) AS kept,
-            (SELECT group_concat(d.app_version, '|') FROM devices d
-              WHERE d.account_id = a.account_id AND d.revoked_at IS NULL
-                AND d.last_seen_at > ?3 AND d.device_id <> a.sync_device
-                AND d.app_version IS NOT NULL) AS others
-       FROM accounts a
-      WHERE a.tier = 'free'
-        AND a.email IS NOT NULL
-        AND a.sync_email_at IS NULL
-        AND a.sync_device IS NOT NULL
-        AND COALESCE(a.sync_until, a.created_at + ?1) <= ?2
-        AND a.created_at >= ?5
-        AND NOT EXISTS (SELECT 1 FROM devices d
-              WHERE d.account_id = a.account_id
-                AND (d.created_at IS NULL OR d.created_at < ?5))
-        AND EXISTS (SELECT 1 FROM devices d
-              WHERE d.account_id = a.account_id AND d.device_id = a.sync_device
-                AND d.revoked_at IS NULL AND d.last_seen_at > ?3)
-        AND EXISTS (SELECT 1 FROM devices d
-              WHERE d.account_id = a.account_id AND d.revoked_at IS NULL
-                AND d.last_seen_at > ?3 AND d.device_id <> a.sync_device
-                AND d.app_version IS NOT NULL)
-      ORDER BY random()
-      LIMIT ?4`,
-  ).bind(SYNC_WEEK, now, now - SYNC_ACTIVE, SYNC_EMAIL_SCAN, since)
-    .all<{ account_id: string; email: string; kept: string | null; others: string | null }>();
-
-  const paused = (due.results ?? [])
-    .filter((r) => canExplainPause(r.kept) && (r.others ?? "").split("|").some(canExplainPause))
-    .slice(0, SYNC_EMAIL_BATCH);
-  for (const row of paused) {
-    if (await sendNudgeMail(env, "sync_week_email", row.account_id, row.email, syncWeekMail())) {
-      await env.DB.prepare("UPDATE accounts SET sync_email_at = ?2 WHERE account_id = ?1")
-        .bind(row.account_id, now).run();
-    }
-  }
-}
-
-export function syncWeekMail(): NudgeMail {
-  const upgrade = "https://relic.space/upgrade?source=sync_week_email";
-  const help = "https://relic.space/help/how-sync-works";
-  return {
-    subject: "Relic now syncs one of your devices",
-    text:
-      "Your free week of sync on all your devices is over.\n\n" +
-      "The free plan syncs one device. Relic keeps syncing the first device " +
-      "that checked in after your week ended, and sync is paused on the " +
-      "others. Nothing is lost. Each device keeps everything it already has " +
-      "and keeps saving new things.\n\n" +
-      "To pick which device syncs, open Relic on it and choose \"Sync this PC " +
-      "instead\" (or this Mac, or this phone). You can switch once a week.\n\n" +
-      "Pro syncs all your devices for $7 a month or $60 a year.\n\n" +
-      `${upgrade}\n\n` +
-      `More about how sync works: ${help}\n\n` +
-      "Reply to this email if anything is off.\n\n" +
-      "The Relic team",
-    html:
-      "<p>Your free week of sync on all your devices is over.</p>" +
-      "<p>The free plan syncs one device. Relic keeps syncing the first " +
-      "device that checked in after your week ended, and sync is paused on " +
-      "the others. Nothing is lost. Each device keeps everything it already " +
-      "has and keeps saving new things.</p>" +
-      "<p>To pick which device syncs, open Relic on it and choose \"Sync this PC " +
-      "instead\" (or this Mac, or this phone). You can switch once a week.</p>" +
-      "<p>Pro syncs all your devices for $7 a month or $60 a year.</p>" +
-      `<p><a href="${upgrade}">Get Pro</a></p>` +
-      `<p><a href="${help}">More about how sync works</a></p>` +
-      "<p>Reply to this email if anything is off.</p>" +
-      "<p>The Relic team</p>",
-  };
-}
+export async function syncWeekSweep(_env: Env): Promise<void> {}

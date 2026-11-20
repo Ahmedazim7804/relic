@@ -11,7 +11,6 @@ import 'package:uuid/uuid.dart';
 
 import '../models/copy_context.dart';
 import '../models/relic.dart';
-import 'voice_capture.dart';
 import '../models/rich_body.dart';
 import '../platform/clipboard_bridge.dart';
 import '../platform/login_item.dart';
@@ -2855,68 +2854,7 @@ class LocalDeskRepo extends ChangeNotifier implements RelicRepo, BillingRepo {
 
   // --- capture ---
 
-  /// Stable session IDs make retries idempotent, independently of text content.
-  VoiceCaptureResult captureVoice({
-    required String sessionId,
-    required String text,
-    required Map<String, dynamic> metadata,
-    required bool promote,
-    String? sourceApp,
-  }) {
-    final db = _db;
-    if (db == null) throw StateError('The local vault is unavailable.');
-    if (!RegExp(r'^[a-f0-9-]{36}$').hasMatch(sessionId)) {
-      throw ArgumentError('Invalid voice session');
-    }
-    final existing = db.getByUid(sessionId);
-    if (existing != null) {
-      return VoiceCaptureResult(
-        existing,
-        created: false,
-        promotionRefused: promote && !existing.promoted,
-      );
-    }
-    final content = text.trim();
-    final size = textByteSize(content, null, voice: metadata);
-    if (content.isEmpty || size > maxItemBytes) {
-      throw StateError(
-        'The voice note is empty or exceeds the item size limit.',
-      );
-    }
-    final requested = promote || _autoVault;
-    final promoted = _promoteOnCapture(requested, size);
-    final tags = _tagsFor(content);
-    tags.add(promote ? 'voice-note' : 'dictation');
-    if (sourceApp != null &&
-        sourceApp.isNotEmpty &&
-        !tags.contains(sourceApp)) {
-      tags.add(sourceApp);
-    }
-    final relic = Relic(
-      uid: sessionId,
-      createdAt: _now,
-      updatedAt: _now,
-      kind: Kind.string,
-      source: Source.voice,
-      promoted: promoted,
-      byteSize: size,
-      device: deviceLabel,
-      tags: tags,
-      content: content,
-      preview: _preview(content),
-      voice: Map<String, dynamic>.from(metadata),
-    );
-    db.upsert(relic, queuePush: syncEnabled);
-    _enforceRetention();
-    _refreshWindow();
-    notifyListeners();
-    _kickSync();
-    return VoiceCaptureResult(
-      relic,
-      created: true,
-      promotionRefused: requested && !promoted,
-    );
-  }
+
 
   /// Capture clipboard text. Re-copying existing content bumps it rather than
   /// duplicating (also makes picking idempotent vs the watcher). [sourceApp]
@@ -6129,11 +6067,7 @@ class LocalDeskRepo extends ChangeNotifier implements RelicRepo, BillingRepo {
   /// preview for images. Degrades to Stage-A while the models download. Mirrors
   /// relic-app's enricher: scoped to the vault, idempotent via enrich_level,
   /// and it never clobbers the user's title/note/user_tags.
-  /// Interactive speech takes precedence over starting background enrichment.
-  bool voiceBusy = false;
-
   Future<void> _enrichCycle() async {
-    if (voiceBusy) return;
     final sift = _sift;
     final db = _db;
     if (_enriching || !_mlEnrich || sift == null || db == null) return;
@@ -7040,115 +6974,17 @@ class LocalDeskRepo extends ChangeNotifier implements RelicRepo, BillingRepo {
   @override
   List<WaitingCopy> get waiting => _waiting;
 
-  // --- billing (Upgrade / Manage), backed by the Worker /stripe/* routes ---
-  List<BillingPlan>? _plansCache;
-  DateTime _plansAt = DateTime.fromMillisecondsSinceEpoch(0);
-
-  /// Cached for six hours once the server answers, one minute when it does
-  /// not. The popup asks on every open now that the strip names the price, and
-  /// the plans route is per-IP rate limited.
   @override
-  Future<List<BillingPlan>> billingPlans() async {
-    if (_syncUrl == null) return const [];
-    final cached = _plansCache;
-    if (cached != null) {
-      final ttl = cached.isEmpty
-          ? const Duration(minutes: 1)
-          : const Duration(hours: 6);
-      if (DateTime.now().difference(_plansAt) < ttl) return cached;
-    }
-    final plans = await _loadPlans();
-    _plansCache = plans;
-    _plansAt = DateTime.now();
-    return plans;
-  }
-
-  Future<List<BillingPlan>> _loadPlans() async {
-    try {
-      final r = await http.get(Uri.parse(_u('/stripe/plans')), headers: _h);
-      if (r.statusCode != 200) return const [];
-      final j = jsonDecode(r.body) as Map<String, dynamic>;
-      return [
-        for (final p in (j['plans'] as List? ?? const []))
-          BillingPlan.fromJson(p as Map<String, dynamic>),
-      ];
-    } catch (_) {
-      return const [];
-    }
-  }
+  Future<List<BillingPlan>> billingPlans() async => const [];
 
   @override
-  Future<String?> upgradeUrl([String? source]) async {
-    final plans = await billingPlans();
-    // No plans means nothing to sell: sync is off, the server is a self-hosted
-    // one with no Stripe, or we are offline. Say nothing rather than fail.
-    if (plans.isEmpty) return null;
-    final pick = plans.firstWhere(
-      (p) => p.tier == 'pro' && p.interval == 'month',
-      orElse: () => plans.first,
-    );
-    return checkoutUrl(pick.priceId, source: source);
-  }
+  Future<String?> upgradeUrl([String? source]) async => null;
 
   @override
-  Future<String?> checkoutUrl(String priceId, {String? source}) async {
-    if (_syncUrl == null) return null;
-    await _maybeRefresh();
-    final r = await _billingPost(
-      '/stripe/checkout',
-      headers: {..._h, 'Content-Type': 'application/json'},
-      body: jsonEncode({'price_id': priceId, 'source': ?source}),
-    );
-    final url = (jsonDecode(r.body) as Map<String, dynamic>)['url'] as String?;
-    if (url == null) {
-      throw const BillingException('Billing returned no checkout link.');
-    }
-    return url;
-  }
+  Future<String?> checkoutUrl(String priceId, {String? source}) async => null;
 
   @override
-  Future<String?> portalUrl() async {
-    if (_syncUrl == null) return null;
-    await _maybeRefresh();
-    final r = await _billingPost('/stripe/portal', headers: _h);
-    final url = (jsonDecode(r.body) as Map<String, dynamic>)['url'] as String?;
-    if (url == null) {
-      throw const BillingException('Billing returned no portal link.');
-    }
-    return url;
-  }
-
-  /// POST a billing route; anything but a 200 becomes a [BillingException]
-  /// whose message the settings pane can show verbatim.
-  Future<http.Response> _billingPost(
-    String path, {
-    required Map<String, String> headers,
-    String? body,
-  }) async {
-    final http.Response r;
-    try {
-      r = await http.post(Uri.parse(_u(path)), headers: headers, body: body);
-    } catch (_) {
-      throw const BillingException(
-          'Could not reach the billing service. Check your connection.');
-    }
-    if (r.statusCode == 200) return r;
-    String? code, message;
-    try {
-      final j = jsonDecode(r.body) as Map<String, dynamic>;
-      code = j['error'] as String?;
-      message = j['message'] as String?;
-    } catch (_) {}
-    throw BillingException(switch (code) {
-      'no_subscription' =>
-        'No subscription to manage yet. Upgrade first, then manage your plan here.',
-      'billing_unconfigured' => 'Billing is not available right now.',
-      'rate_limited' => 'Too many attempts. Try again in a minute.',
-      'unauthorized' =>
-        'Your session has expired. Reconnect sync, then try again.',
-      _ => message ?? 'Billing request failed (HTTP ${r.statusCode}).',
-    });
-  }
+  Future<String?> portalUrl() async => null;
 
   void _saveCursors() {
     try {

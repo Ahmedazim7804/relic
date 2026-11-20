@@ -5,7 +5,7 @@
 // auth.ts (Supabase JWT bridge + legacy device token), billing in stripe.ts,
 // tier caps in tiers.ts, bindings/config in env.ts, HTTP helpers in http.ts.
 
-import type { Env, StripeMessage } from "./env";
+import type { Env } from "./env";
 import { accountCreatedAt, RING_NEW, ringCap, TIERS } from "./tiers";
 import {
   BLOB_ID,
@@ -30,21 +30,10 @@ import {
   sharePageResponse,
   sweepShares,
 } from "./share";
-import {
-  consumeStripeBatch,
-  createCheckout,
-  createPortal,
-  graceSweep,
-  listPlans,
-  reconcile,
-  ringNudgeSweep,
-  stripeWebhook,
-  vaultCapSweep,
-} from "./stripe";
 import { sweepAbandonedMpus, sweepOrphanBlobs, sweepTombstones } from "./sweep";
 import { claimAi, listAi, putAi, releaseAi } from "./ai";
 import { pokeSync, SyncSocket } from "./notify";
-import { forgetSyncPlan, isSyncPaused, pickSyncDevice, readSyncPlan, syncPausedResponse, syncWeekSweep } from "./syncplan";
+import { forgetSyncPlan, isSyncPaused, pickSyncDevice, readSyncPlan, syncPausedResponse } from "./syncplan";
 
 // Re-exported so Wrangler can bind the Durable Object class (it must be exported
 // from the Worker's main module).
@@ -486,13 +475,7 @@ async function route(req: Request, env: Env, ctx?: ExecutionContext): Promise<Re
       }
     }
 
-    // Unauthenticated routes: the webhook self-authenticates via its signature;
-    // plan listing is public pricing info.
-    if (path === "/stripe/webhook" && req.method === "POST") return stripeWebhook(req, env);
-    if (path === "/stripe/plans" && req.method === "GET") {
-      const limited = await rateLimit(req, env.RL_PLANS, "RL_PLANS", clientIp(req)); // per-IP (pre-auth)
-      return limited ?? listPlans(env);
-    }
+
 
     // Public share views (recipients have no account). The page never touches
     // the view count; only the ciphertext fetch does (see src/share.ts).
@@ -568,15 +551,7 @@ async function route(req: Request, env: Env, ctx?: ExecutionContext): Promise<Re
       return env.SYNC.get(env.SYNC.idFromName(auth.account)).fetch(req);
     }
 
-    // --- billing (authed: identity = the bearer / Supabase JWT) ---
-    if (path === "/stripe/checkout" && req.method === "POST") {
-      const limited = await rateLimit(req, env.RL_BILLING, "RL_BILLING", auth.account);
-      return limited ?? createCheckout(req, env, auth);
-    }
-    if (path === "/stripe/portal" && req.method === "POST") {
-      const limited = await rateLimit(req, env.RL_BILLING, "RL_BILLING", auth.account);
-      return limited ?? createPortal(req, env, auth);
-    }
+
 
     // --- share links (create/revoke; viewing is public, above) ---
     if (path === "/share" && req.method === "POST") {
@@ -914,38 +889,7 @@ export default {
     return withRateLimitHeaders(req, await route(req, env, ctx));
   },
 
-  // Stripe billing queue consumer (only invoked when STRIPE_QUEUE is bound and a
-  // [[queues.consumers]] points here). Applies each event idempotently.
-  async queue(batch: MessageBatch<StripeMessage>, env: Env): Promise<void> {
-    await consumeStripeBatch(batch, env);
-  },
-
-  // Cron (wrangler.toml [triggers]). Expire grace windows, reconcile D1
-  // against Stripe (source of truth) to repair any drift, then GC dead shares
-  // (expiry is enforced at read time — this is only garbage collection),
-  // orphaned blobs, and aged-out tombstones (src/sweep.ts). The janitor pair
-  // is fenced so a sweep failure can't starve the billing sweeps.
   async scheduled(_event: ScheduledController, env: Env): Promise<void> {
-    await graceSweep(env);
-    // Fenced on their own: one nudge email must never be able to fail the
-    // billing sweeps behind it. Both free walls get a pass every tick; each
-    // keeps its own stamp column, so neither can swallow the other.
-    try {
-      await ringNudgeSweep(env);
-    } catch (e) {
-      console.error(JSON.stringify({ evt: "ring_email_error", err: String(e) }));
-    }
-    try {
-      await vaultCapSweep(env);
-    } catch (e) {
-      console.error(JSON.stringify({ evt: "vault_email_error", err: String(e) }));
-    }
-    try {
-      await syncWeekSweep(env);
-    } catch (e) {
-      console.error(JSON.stringify({ evt: "sync_week_email_error", err: String(e) }));
-    }
-    await reconcile(env);
     await sweepShares(env);
     try {
       const blobs = await sweepOrphanBlobs(env);
@@ -956,4 +900,4 @@ export default {
       console.error(JSON.stringify({ evt: "janitor_error", err: String(e) }));
     }
   },
-} satisfies ExportedHandler<Env, StripeMessage>;
+} satisfies ExportedHandler<Env>;

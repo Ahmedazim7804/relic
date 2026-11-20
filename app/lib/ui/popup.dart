@@ -10,7 +10,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../data/local_save.dart';
 import '../data/repo.dart';
-import '../data/voice_controller.dart';
+
 import '../data/save_prefs.dart';
 import '../data/result_grouping.dart';
 import '../data/temporal_parser.dart';
@@ -682,13 +682,7 @@ class _PopupViewState extends State<PopupView> {
               "Settings, Sync and account, Add a device. Point your phone's camera at the code, and everything you keep shows up there too.",
           helpKey: 'sync.addDevice',
         ),
-        if (VoiceController.bundled)
-          CoachStep(
-            targetKey: _kNone,
-            title: 'Talk instead of type',
-            body:
-                'Hold ${VoiceController.keyLabel} and speak. The words land in whatever you were typing into, and a copy is kept here. Turn it on in Settings, Voice.',
-          ),
+
         CoachStep(
           targetKey: _kHelp,
           title: 'Every shortcut, one place',

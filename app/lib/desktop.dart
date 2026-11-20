@@ -38,13 +38,11 @@ import 'data/device_directory.dart';
 import 'data/hotkeys.dart';
 import 'data/local_desk_repo.dart';
 import 'data/recovery.dart';
-import 'data/repo.dart' show ringNoticeBody, sizeCapNoticeBody;
 import 'data/self_update.dart';
 import 'data/sync_plan.dart';
 import 'data/supabase_auth.dart';
 import 'data/update_check.dart';
 import 'models/relic.dart';
-import 'data/voice_controller.dart';
 import 'onboarding/add_device.dart';
 import 'onboarding/install_offer.dart';
 import 'theme/relic_theme.dart';
@@ -56,7 +54,6 @@ import 'ui/settings.dart';
 import 'models/copy_context.dart';
 import 'platform/copy_context.dart';
 import 'ui/search_tuning_panel.dart';
-import 'ui/voice_offer.dart';
 import 'platform/popup_placement.dart';
 import 'platform/rich_formats.dart';
 import 'widgets/controls.dart';
@@ -161,31 +158,22 @@ Future<void> runRealApp(List<String> args) async {
       repo: repo,
       showOnLaunch: launchLink != null,
       autostart: autostart,
-      voiceSettingsOnLaunch: args.contains('--voice-settings'),
     ),
   );
-  // macOS: begin listening for the launch URL event + any later links.
   unawaited(DesktopLinks.init());
 }
 
 class RealApp extends StatefulWidget {
   final LocalDeskRepo repo;
 
-  /// True when the process was started by a `relic://` deep link, so the popup
-  /// should surface on launch rather than starting hidden in the tray.
   final bool showOnLaunch;
 
-  /// True when launched by the run-at-login entry (--autostart): stay hidden in
-  /// the tray, skipping even the first-run onboarding, so login never surfaces
-  /// a window that grabs focus.
   final bool autostart;
-  final bool voiceSettingsOnLaunch;
   const RealApp({
     super.key,
     required this.repo,
     this.showOnLaunch = false,
     this.autostart = false,
-    this.voiceSettingsOnLaunch = false,
   });
   @override
   State<RealApp> createState() => _RealAppState();
@@ -197,25 +185,17 @@ class _RealAppState extends State<RealApp>
         WindowListener,
         TrayListener,
         ClipboardListener {
-  late final VoiceController _voice = VoiceController(widget.repo);
   bool _paused = false;
 
-  /// Timed pause: auto-resume timer + the moment capture comes back (null =
-  /// paused until resumed / not paused). The notifier drives the popup's
-  /// "Capture paused" pill live.
   Timer? _pauseTimer;
   DateTime? _pausedUntil;
   final ValueNotifier<bool> _pausedSignal = ValueNotifier(false);
   bool _visible = false;
   bool _connecting = false;
-  bool _onboardStartAtSignIn =
-      false; // onboarding step: false = main welcome page
-  // Open onboarding on the "I already use Relic on another device" door.
-  // Set only by the second-vault notice; every other entry clears it.
+  bool _onboardStartAtSignIn = false;
   bool _onboardStartReturning = false;
   bool _settingsOpen = false;
-  bool _tuningOpen = false; // dev search tuning strip (RELIC_SEARCH_TUNING=1)
-  bool _voiceSettingsRequested = false;
+  bool _tuningOpen = false;
 
   /// Non-null when this copy of Relic is running from the disk image (or the
   /// shadow copy macOS makes of one) and should offer to install itself into
@@ -288,10 +268,6 @@ class _RealAppState extends State<RealApp>
   @override
   void initState() {
     super.initState();
-    if (VoiceController.supported) {
-      _voice.addListener(_voiceChanged);
-      unawaited(_voice.initialize());
-    }
     WidgetsBinding.instance.addObserver(this);
     windowManager.addListener(this);
     trayManager.addListener(this);
@@ -406,17 +382,6 @@ class _RealAppState extends State<RealApp>
         await _dismiss();
         return;
       }
-      if (widget.voiceSettingsOnLaunch && VoiceController.supported) {
-        setState(() {
-          _settingsOpen = true;
-          _voiceSettingsRequested = true;
-        });
-        await _sizeWindow(820, 650);
-        await windowManager.center();
-        await _present(foreground: true);
-        _visible = true;
-        return;
-      }
       if (firstRun) {
         setState(() => _connecting = true);
         await _sizeWindow(520, 560);
@@ -511,26 +476,8 @@ class _RealAppState extends State<RealApp>
     unawaited(_show(Summon.deepLink));
   }
 
-  String _voiceMenuState = '';
-  bool _voiceOfferShown = false;
-  void _voiceChanged() {
-    final key =
-        '${_voice.ready}/${_voice.busy}/${_voice.recording}/${_voice.hasPending}';
-    if (mounted && key != _voiceMenuState) {
-      _voiceMenuState = key;
-      unawaited(_rebuildMenu());
-    }
-    // The opt-in card flips on when initialize() finishes and off when it is
-    // answered; neither changes the tray menu, so rebuild the window for it.
-    if (mounted && _voice.offerPending != _voiceOfferShown) {
-      setState(() => _voiceOfferShown = _voice.offerPending);
-    }
-  }
-
   @override
   void dispose() {
-    _voice.removeListener(_voiceChanged);
-    _voice.dispose();
     DesktopLinks.onLink = null;
     WidgetsBinding.instance.removeObserver(this);
     widget.repo.onHotkeysChanged = null;
@@ -629,7 +576,7 @@ class _RealAppState extends State<RealApp>
           devices: e.devices,
           label: Platform.localHostname,
           platform: DeviceId.platform(),
-          onUpgrade: _upgradeToPro,
+          onUpgrade: null,
         );
       },
     );
@@ -678,17 +625,6 @@ class _RealAppState extends State<RealApp>
       Menu(
         items: [
           MenuItem(key: 'show', label: 'Open history'),
-          if (VoiceController.supported) ...[
-            MenuItem(key: 'voice_settings', label: 'Voice settings'),
-            if (_voice.ready && !_voice.busy && !_voice.hasPending) ...[
-              MenuItem(key: 'voice_dictate', label: 'Start dictation'),
-              MenuItem(key: 'voice_note', label: 'Save a voice note'),
-            ],
-            if (_voice.recording)
-              MenuItem(key: 'voice_stop', label: 'Stop recording'),
-            if (_voice.busy)
-              MenuItem(key: 'voice_cancel', label: 'Cancel recording'),
-          ],
           // Timed pause: forgetting a pause used to silently eat copies for
           // days; the timed options resume by themselves and the popup shows
           // a pill while paused either way.
@@ -1336,13 +1272,6 @@ class _RealAppState extends State<RealApp>
   /// The repo notifies on every result/query change; when the mini picker is
   /// open, debounce a re-hug so the window tracks the match count smoothly.
   void _onRepoTick() {
-    // Before the visibility early-return too: a pull that lands while the
-    // window is hidden is exactly when this needs to be heard.
-    _maybeNotifyRing();
-    _maybeNotifySizeCap();
-    // Before the visibility early-return: the stack changes most often while
-    // the popup is HIDDEN (that is what the push hotkey is for), and the tray
-    // is the only surface showing it then.
     final depth = widget.repo.pasteStackDepth;
     if (depth != _lastStackDepth) {
       _lastStackDepth = depth;
@@ -1481,7 +1410,6 @@ class _RealAppState extends State<RealApp>
       }
       setState(() {
         _settingsOpen = false;
-        _voiceSettingsRequested = false;
       });
       _sizeWindow(_popupDims.width, _popupDims.height);
       return KeyEventResult.handled;
@@ -1615,7 +1543,6 @@ class _RealAppState extends State<RealApp>
       if (_settingsOpen) {
         setState(() {
           _settingsOpen = false;
-          _voiceSettingsRequested = false;
         });
       }
       _annotateRequest = EditRequest(r, promoted: promoted);
@@ -2024,20 +1951,6 @@ class _RealAppState extends State<RealApp>
   @override
   void onTrayMenuItemClick(MenuItem item) async {
     switch (item.key) {
-      case 'voice_settings':
-        _voiceSettingsRequested = true;
-        setState(() => _settingsOpen = true);
-        await _sizeWindow(820, 650);
-        await _present(foreground: true);
-        _visible = true;
-      case 'voice_dictate':
-        await _voice.start();
-      case 'voice_note':
-        await _voice.start(note: true);
-      case 'voice_stop':
-        await _voice.stop();
-      case 'voice_cancel':
-        await _voice.cancel();
       case 'show':
         _show(Summon.tray);
       case 'pause_10':
@@ -2067,15 +1980,6 @@ class _RealAppState extends State<RealApp>
       case 'pause_help':
         await _openHelpPage('tray.pause');
       case 'quit':
-        if (VoiceController.supported && _voice.hasPending) {
-          _voiceSettingsRequested = true;
-          setState(() => _settingsOpen = true);
-          await _sizeWindow(820, 650);
-          await _present(foreground: true);
-          _visible = true;
-          return;
-        }
-        if (VoiceController.supported) await _voice.shutdown();
         await trayManager.destroy();
         await windowManager.destroy();
     }
@@ -2256,86 +2160,6 @@ class _RealAppState extends State<RealApp>
   }
 
   /// Open Stripe checkout for the Pro monthly plan in the browser — the
-  /// device-cap dialog's "Upgrade" action. Best-effort; the dialog surfaces a
-  /// failure. [source] tags which button started it, for the ring surfaces.
-  Future<void> _upgradeToPro({String? source}) async {
-    final url = await widget.repo.upgradeUrl(source);
-    // Nothing to sell: no plans came back (self-hosted server, sync off, or
-    // offline). The device-cap dialog wants to say so; the ring surfaces stay
-    // quiet, which is what _ringUpgrade does with this.
-    if (url == null) throw StateError('Upgrade is unavailable right now.');
-    await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
-    _afterBillingOpened();
-  }
-
-  /// The popup's ring buttons. Same checkout, but a failure is silent: a strip
-  /// that pops an error is worse than one that does nothing.
-  Future<void> _ringUpgrade(String source) async {
-    try {
-      await _upgradeToPro(source: source);
-    } catch (_) {}
-  }
-
-  /// Get out of the browser's way once a billing page is open: hide the window
-  /// and leave the next summon on the plain popup, not Settings.
-  void _afterBillingOpened() {
-    _hide();
-    if (mounted) {
-      setState(() {
-        _settingsOpen = false;
-        _voiceSettingsRequested = false;
-      });
-    }
-    _sizeWindow(_popupDims.width, _popupDims.height);
-  }
-
-  /// One-time toasts when the free ring starts holding copies back. Driven off
-  /// the repo tick, which fires after every pull, so the numbers are fresh.
-  /// The flags are per account and persist, so each notice is shown once ever.
-  void _maybeNotifyRing() {
-    if (storeSafeBuild) return;
-    final repo = widget.repo;
-    // The cheap check first: this runs on every repo tick, and almost every
-    // tick has nothing to do with the ring.
-    if (repo.account?.ringCapped != true) return;
-    final sent = repo.ringNotified;
-    final body = ringNoticeBody(repo.account, repo.supabaseUserId ?? '', sent);
-    if (body == null) return;
-    repo.setRingNotified(sent);
-    // Linux never delivers a click on a notification body, so the copy has to
-    // stand on its own. It does; there is no click handler here.
-    _notify('Relic', body);
-  }
-
-  /// One-time toast the first time the free plan refuses a copy as too large
-  /// to sync. A click opens the upgrade page (Linux gets it as a button).
-  void _maybeNotifySizeCap() {
-    if (storeSafeBuild) return;
-    final repo = widget.repo;
-    final account = repo.account;
-    // Cheap checks first: this runs on every repo tick.
-    if (account == null || !account.isFree) return;
-    final id = repo.supabaseUserId ?? '';
-    final sent = repo.ringNotified;
-    if (sent.contains('size_cap_notified:$id')) return;
-    final body = sizeCapNoticeBody(account, repo.tooLargeCount, id, sent);
-    if (body == null) return;
-    repo.setRingNotified(sent);
-    try {
-      actionableNotification(
-        title: 'Too large to sync',
-        body: body,
-        actionLabel: 'See Pro',
-        onActivate: () => _ringUpgrade('size_cap_toast'),
-        isLinux: Platform.isLinux,
-      ).show();
-    } catch (_) {}
-  }
-
-  /// Guided "switch account": disconnect, then re-open onboarding on the main
-  /// welcome/sign-in page — the full chooser with Google/GitHub/Apple and the
-  /// email options — rather than dropping straight onto the email+password form
-  /// (which stranded people who sign in with a provider).
   void _switchAccount() {
     widget.repo.disconnectSync();
     _rebuildMenu();
@@ -2435,14 +2259,11 @@ class _RealAppState extends State<RealApp>
     }
     if (_settingsOpen) {
       return SettingsView(
-        voice: VoiceController.supported ? _voice : null,
-        startOnVoice: _voiceSettingsRequested,
         repo: widget.repo,
         startOnSync: !widget.repo.syncEnabled,
         onClose: () {
           setState(() {
             _settingsOpen = false;
-            _voiceSettingsRequested = false;
           });
           _sizeWindow(_popupDims.width, _popupDims.height);
         },
@@ -2461,13 +2282,8 @@ class _RealAppState extends State<RealApp>
           if (mounted) setState(() {});
         },
         onSwitchAccount: _switchAccount,
-        // After an in-Settings self-host connect: show the recovery kit on a
-        // freshly created vault + register the device (reused whole; it
-        // self-guards on vaultJustCreated and no-ops otherwise).
         onSelfHostPostConnect: _afterDesktopConnect,
-        onUpgrade: _upgradeToPro,
         onRenameThisDevice: (label) async => widget.repo.setDeviceName(label),
-        onBillingOpened: _afterBillingOpened,
       );
     }
     final popup = PopupView(
@@ -2475,8 +2291,6 @@ class _RealAppState extends State<RealApp>
       annotate: _annotateRequest,
       onModalChanged: (open) {
         _popupModalOpen = open;
-        // A closed modal consumes the pending annotate request; a stale one
-        // must not reopen the editor on the next ordinary summon.
         if (!open) _annotateRequest = null;
       },
       onClose: () => _hide(),
@@ -2489,8 +2303,7 @@ class _RealAppState extends State<RealApp>
       capturePaused: _pausedSignal,
       pausedUntil: () => _pausedUntil,
       onResumeCapture: () => _setPaused(false),
-      // The one gate for every history-ring surface in the popup.
-      onUpgrade: storeSafeBuild ? null : _ringUpgrade,
+      onUpgrade: null,
       globalShortcuts: [
         (widget.repo.historyHotkey.display, 'open your history'),
         (widget.repo.miniHotkey.display, 'open the mini picker'),
@@ -2612,20 +2425,7 @@ class _RealAppState extends State<RealApp>
                   ),
                 ],
               );
-        if (!_voice.offerPending) return body;
-        // The one-time Voice opt-in, a modal over the popup on first open.
-        // Both answers are remembered, so it never comes back.
-        return Stack(
-          fit: StackFit.expand,
-          children: [
-            body,
-            VoiceOffer(
-              dark: _useDark,
-              onAccept: () => unawaited(_voice.acceptOffer()),
-              onDecline: () => unawaited(_voice.declineOffer()),
-            ),
-          ],
-        );
+        return body;
       },
     );
   }
@@ -2801,13 +2601,6 @@ class _RealAppState extends State<RealApp>
                   ).showSnackBar(_snack(c, r.message()));
                 },
         ),
-        if (!storeSafeBuild) ...[
-          const SizedBox(width: Insets.xs),
-          GhostButton(
-            label: 'Get Pro',
-            onTap: () => _ringUpgrade('sync_paused'),
-          ),
-        ],
       ],
     );
   }
@@ -2821,12 +2614,6 @@ class _RealAppState extends State<RealApp>
       icon: LucideIcons.clock,
       text: '$line After that, one device keeps syncing.',
       actions: [
-        if (!storeSafeBuild)
-          GhostButton(
-            label: 'Get Pro',
-            onTap: () => _ringUpgrade('sync_week'),
-          ),
-        const SizedBox(width: Insets.xs),
         GhostIconButton(
           icon: LucideIcons.x,
           iconSize: 15,
