@@ -22,14 +22,6 @@ import { clampLimit, CORS, err, json, pageLimitFor } from "./http";
 import { clientIp, rateLimit, withRateLimitHeaders } from "./ratelimit";
 import { deleteAccount, revokeSupabaseSessions } from "./account";
 import { sendDownloadLink } from "./download_link";
-import {
-  createShare,
-  fetchShareBlob,
-  isShareId,
-  revokeShare,
-  sharePageResponse,
-  sweepShares,
-} from "./share";
 import { sweepAbandonedMpus, sweepOrphanBlobs, sweepTombstones } from "./sweep";
 import { claimAi, listAi, putAi, releaseAi } from "./ai";
 import { pokeSync, SyncSocket } from "./notify";
@@ -477,19 +469,6 @@ async function route(req: Request, env: Env, ctx?: ExecutionContext): Promise<Re
 
 
 
-    // Public share views (recipients have no account). The page never touches
-    // the view count; only the ciphertext fetch does (see src/share.ts).
-    const sharePageMatch = path.match(/^\/s\/([A-Za-z0-9_-]{1,64})$/);
-    if (sharePageMatch && req.method === "GET") {
-      const limited = await rateLimit(req, env.RL_SHARE_VIEW, "RL_SHARE_VIEW", clientIp(req));
-      return limited ?? sharePageResponse(env, sharePageMatch[1]);
-    }
-    const shareBlobMatch = path.match(/^\/share\/([A-Za-z0-9_-]{1,64})\/blob$/);
-    if (shareBlobMatch && req.method === "GET") {
-      const limited = await rateLimit(req, env.RL_SHARE_VIEW, "RL_SHARE_VIEW", clientIp(req));
-      return limited ?? fetchShareBlob(env, ctx, shareBlobMatch[1]);
-    }
-
     const auth = await authenticate(req, env);
     if (auth instanceof Response) return auth;
 
@@ -552,17 +531,6 @@ async function route(req: Request, env: Env, ctx?: ExecutionContext): Promise<Re
     }
 
 
-
-    // --- share links (create/revoke; viewing is public, above) ---
-    if (path === "/share" && req.method === "POST") {
-      const limited = await rateLimit(req, env.RL_SHARE, "RL_SHARE", auth.account);
-      return limited ?? createShare(req, url, env, auth);
-    }
-    const shareMatch = path.match(/^\/share\/([A-Za-z0-9_-]{1,64})$/);
-    if (shareMatch && req.method === "DELETE" && isShareId(shareMatch[1])) {
-      const limited = await rateLimit(req, env.RL_SHARE, "RL_SHARE", auth.account);
-      return limited ?? revokeShare(env, auth, shareMatch[1]);
-    }
 
     // --- keyparams ---
     if (path === "/keyparams" && req.method === "GET") {
@@ -890,7 +858,6 @@ export default {
   },
 
   async scheduled(_event: ScheduledController, env: Env): Promise<void> {
-    await sweepShares(env);
     try {
       const blobs = await sweepOrphanBlobs(env);
       const tombstones = await sweepTombstones(env);

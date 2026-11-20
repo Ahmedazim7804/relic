@@ -16,7 +16,6 @@ import 'package:relic_app/ui/connect_dialog.dart';
 import 'package:relic_app/ui/dialogs.dart';
 import 'package:relic_app/ui/onboarding.dart';
 import 'package:relic_app/ui/popup.dart';
-import 'package:relic_app/ui/share_dialog.dart';
 import 'package:relic_app/widgets/controls.dart';
 import 'package:relic_app/widgets/relic_mark.dart';
 
@@ -560,48 +559,6 @@ void main() {
     // goes straight to the link: pick a short expiry (1 hour), turn on
     // One-time view, Create link -> the real created-link state shows the URL,
     // QR, and the "One-time view · expires …" caption (dies after one reveal).
-    await record(
-      name: 'share',
-      build: (c) => Center(
-        child: Padding(
-          padding: const EdgeInsets.all(14),
-          // Fade/scale-in so the dialog opens deliberately, then holds on the
-          // options (the "encrypted on this device, key never reaches the
-          // server" preamble) before the link is created.
-          child: TweenAnimationBuilder<double>(
-            tween: Tween(begin: 0, end: 1),
-            duration: const Duration(milliseconds: 320),
-            curve: Curves.easeOutCubic,
-            builder: (_, v, child) => Opacity(
-              opacity: v,
-              child: Transform.scale(scale: 0.97 + 0.03 * v, child: child),
-            ),
-            child: ShareDialog(
-              relic: repo.all.firstWhere((r) => r.uid == 'invoice'),
-              repo: repo,
-              onClose: () {},
-            ),
-          ),
-        ),
-      ),
-      logical: const Size(520, 720),
-      length: const Duration(milliseconds: 7000),
-      acts: [
-        (
-          const Duration(milliseconds: 2100),
-          () async => tapText('1 hour', optional: true)
-        ),
-        (
-          const Duration(milliseconds: 3200),
-          () async => tapText('One-time view', optional: true)
-        ),
-        (
-          const Duration(milliseconds: 4400),
-          () async => tapText('Create link', optional: true)
-        ),
-      ],
-    );
-
     // 10. Recovery kit: "RELIC KEEPS NO COPY · STORE IT OFFLINE". Mostly a
     // hold; motion comes from the compositor's slow zoom.
     await record(

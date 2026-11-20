@@ -15,7 +15,6 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:relic_app/models/rich_body.dart';
-import 'package:relic_app/data/supabase_auth.dart';
 import 'package:relic_app/data/worker_repo.dart';
 
 class _RealNetwork extends HttpOverrides {}
@@ -51,15 +50,9 @@ void main() {
     } catch (_) {}
   });
 
-  Future<WorkerRepo> repo() => WorkerRepo.bindSupabaseWithMk(
+  Future<WorkerRepo> repo() => WorkerRepo.bindWithMk(
         baseUrl: 'http://127.0.0.1:9', // discard port: every push is offline
-        session: const SupabaseSession(
-          accessToken: '',
-          refreshToken: 'stored-refresh',
-          expiresAt: 0,
-          userId: 'test-user',
-          email: 'user@example.com',
-        ),
+        token: '',
         mk: mk,
       );
 

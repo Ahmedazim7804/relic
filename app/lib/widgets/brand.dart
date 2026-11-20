@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
-import '../data/supabase_auth.dart';
 import '../theme/relic_theme.dart';
 import '../theme/tokens.dart';
 import 'relic_mark.dart';
@@ -44,69 +43,6 @@ class RelicWordmark extends StatelessWidget {
           ),
         ),
       ],
-    );
-  }
-}
-
-/// A real, branded "Continue with ..." button (official Google/GitHub/Apple
-/// marks + each brand's own button styling). Full-width, 50px.
-class OAuthButton extends StatelessWidget {
-  final SupabaseProvider provider;
-  final VoidCallback? onPressed;
-  const OAuthButton({super.key, required this.provider, required this.onPressed});
-
-  @override
-  Widget build(BuildContext context) {
-    final (Color bg, Color fg, String asset, String label, Color border) =
-        switch (provider) {
-      SupabaseProvider.google => (
-          const Color(0xFFFFFFFF),
-          const Color(0xFF1F1F1F),
-          'assets/brand/google.svg',
-          'Continue with Google',
-          const Color(0x1F000000),
-        ),
-      SupabaseProvider.github => (
-          const Color(0xFF24292F),
-          Colors.white,
-          'assets/brand/github.svg',
-          'Continue with GitHub',
-          const Color(0x33FFFFFF),
-        ),
-      SupabaseProvider.apple => (
-          Colors.black,
-          Colors.white,
-          'assets/brand/apple.svg',
-          'Continue with Apple',
-          const Color(0x33FFFFFF),
-        ),
-    };
-    return SizedBox(
-      height: 50,
-      width: double.infinity,
-      child: FilledButton(
-        onPressed: onPressed,
-        style: FilledButton.styleFrom(
-          backgroundColor: bg,
-          foregroundColor: fg,
-          disabledBackgroundColor: bg.withValues(alpha: 0.45),
-          elevation: 0,
-          padding: const EdgeInsets.symmetric(horizontal: Insets.lg),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(Radii.input),
-            side: BorderSide(color: border),
-          ),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            SvgPicture.asset(asset, width: 20, height: 20),
-            const SizedBox(width: Insets.md),
-            Text(label,
-                style: RelicTheme.sans(size: 15, weight: FontWeight.w600)),
-          ],
-        ),
-      ),
     );
   }
 }

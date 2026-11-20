@@ -28,7 +28,6 @@ import 'query_encoder.dart';
 import 'recovery.dart';
 import 'relic_db.dart';
 import 'repo.dart';
-import 'supabase_auth.dart';
 import 'sync_jobs.dart';
 import 'sync_plan.dart';
 import 'sync_socket.dart';
@@ -225,103 +224,6 @@ class WorkerRepo implements RelicRepo {
   /// [restore], and the cache loading at launch never call it.
   void Function()? onUserCapture;
 
-  /// Sign in or sign up with Supabase, then bind sync using the access token as
-  /// the Worker bearer. Identity = the stable Supabase user id; the long-lived
-  /// refresh token is exposed via [refreshToken] for the host to persist.
-  static Future<WorkerRepo> signInSupabase({
-    required String baseUrl,
-    required String email,
-    required String password,
-    required String passphrase,
-    required bool signUp,
-    String deviceLabel = 'Phone',
-    bool autoVault = true,
-    String? deviceId,
-  }) async {
-    final session = signUp
-        ? await SupabaseAuth.signUp(email, password)
-        : await SupabaseAuth.signIn(email, password);
-    return _bindSupabase(
-      baseUrl: baseUrl,
-      session: session,
-      passphrase: passphrase,
-      allowCreate: signUp,
-      deviceLabel: deviceLabel,
-      autoVault: autoVault,
-      deviceId: deviceId,
-    );
-  }
-
-  /// Silent relaunch: reconnect from a persisted refresh token.
-  static Future<WorkerRepo> reconnectSupabase({
-    required String baseUrl,
-    required String refreshToken,
-    required String passphrase,
-    String deviceLabel = 'Phone',
-    bool autoVault = true,
-  }) async {
-    final session = await SupabaseAuth.refresh(refreshToken);
-    return _bindSupabase(
-      baseUrl: baseUrl,
-      session: session,
-      passphrase: passphrase,
-      allowCreate: false,
-      deviceLabel: deviceLabel,
-      autoVault: autoVault,
-    );
-  }
-
-  /// Bind a connected repo from an already-refreshed Supabase session, unlocking
-  /// with the passphrase. Used by silent relaunch (which refreshes the rotating
-  /// token once, then binds) and the legacy cleartext-passphrase migration.
-  static Future<WorkerRepo> fromSession({
-    required String baseUrl,
-    required SupabaseSession session,
-    required String passphrase,
-    bool allowCreate = false,
-    String deviceLabel = 'Phone',
-    bool autoVault = true,
-    String? deviceId,
-  }) =>
-      _bindSupabase(
-        baseUrl: baseUrl,
-        session: session,
-        passphrase: passphrase,
-        allowCreate: allowCreate,
-        deviceLabel: deviceLabel,
-        autoVault: autoVault,
-        deviceId: deviceId,
-      );
-
-  static Future<WorkerRepo> _bindSupabase({
-    required String baseUrl,
-    required SupabaseSession session,
-    required String passphrase,
-    required bool allowCreate,
-    required String deviceLabel,
-    required bool autoVault,
-    String? deviceId,
-  }) async {
-    if (session.userId.isEmpty) {
-      throw StateError('Sign-in did not return a user.');
-    }
-    final repo = WorkerRepo(
-      baseUrl: baseUrl.replaceAll(RegExp(r'/+$'), ''),
-      token: session.accessToken,
-      passphrase: passphrase,
-      deviceLabel: deviceLabel,
-      autoVault: autoVault,
-      deviceId: deviceId,
-    );
-    repo._supabaseMode = true;
-    repo._refreshToken = session.refreshToken;
-    repo._accessExpiry = session.expiresAt;
-    repo.supabaseUserId = session.userId;
-    repo.accountEmail = session.email;
-    await repo._initVaultKey(allowCreate);
-    return repo;
-  }
-
   /// True when connected to a user's OWN self-hosted server (account-less,
   /// passphrase-derived bearer). Drives the mobile UI + persistence: no billing,
   /// a "Self-hosted" label, and reconnect via the device-token path.
@@ -359,6 +261,26 @@ class WorkerRepo implements RelicRepo {
     );
     repo.isSelfHost = true;
     await repo._initVaultKey(true); // create on a fresh vault, else unwrap
+    return repo;
+  }
+
+  static Future<WorkerRepo> bindWithMk({
+    required String baseUrl,
+    required String token,
+    required Uint8List mk,
+    String deviceLabel = 'Phone',
+    bool autoVault = true,
+    String? deviceId,
+  }) async {
+    final repo = WorkerRepo(
+      baseUrl: baseUrl.replaceAll(RegExp(r'/+$'), ''),
+      token: token,
+      passphrase: '',
+      deviceLabel: deviceLabel,
+      autoVault: autoVault,
+      deviceId: deviceId,
+    );
+    repo._mk = mk;
     return repo;
   }
 
@@ -405,38 +327,6 @@ class WorkerRepo implements RelicRepo {
     } catch (_) {
       return false;
     }
-  }
-
-  /// Bind a Supabase session with an already-known master key (the QR-pairing and
-  /// recovery-kit paths, where the MK comes from another device or the kit rather
-  /// than from unwrapping keyparams with a passphrase). The passphrase is left
-  /// empty; the vault is already unlocked.
-  static Future<WorkerRepo> bindSupabaseWithMk({
-    required String baseUrl,
-    required SupabaseSession session,
-    required Uint8List mk,
-    String deviceLabel = 'Phone',
-    bool autoVault = true,
-    String? deviceId,
-  }) async {
-    if (session.userId.isEmpty) {
-      throw StateError('Sign-in did not return a user.');
-    }
-    final repo = WorkerRepo(
-      baseUrl: baseUrl.replaceAll(RegExp(r'/+$'), ''),
-      token: session.accessToken,
-      passphrase: '',
-      deviceLabel: deviceLabel,
-      autoVault: autoVault,
-      deviceId: deviceId,
-    );
-    repo._supabaseMode = true;
-    repo._refreshToken = session.refreshToken;
-    repo._accessExpiry = session.expiresAt;
-    repo.supabaseUserId = session.userId;
-    repo.accountEmail = session.email;
-    repo._mk = mk; // already unlocked; skip keyparams/passphrase
-    return repo;
   }
 
   Uint8List? _mk;
@@ -1302,37 +1192,7 @@ class WorkerRepo implements RelicRepo {
   /// for this account at the IdP. Other devices drop offline as their access
   /// tokens expire (~1h). This device's refresh token is revoked too, so the
   /// host should treat a successful call as a full sign-out.
-  Future<void> signOutEverywhere() async {
-    if (!_supabaseMode) {
-      throw StateError('Signing out everywhere needs a Relic account session.');
-    }
-    await SupabaseAuth.signOutGlobal(token);
-    _refreshToken = null;
-    unawaited(_syncSocket?.stop());
-  }
-
-  /// Change the login (account) email at the IdP. GoTrue emails a confirmation
-  /// link to both the current and the new address; the change lands only once
-  /// confirmed, so the current session keeps working meanwhile. The vault key is
-  /// untouched (auth != vault). Mirrors LocalDeskRepo.changeEmail.
-  Future<void> changeEmail(String newEmail) async {
-    if (!_supabaseMode) {
-      throw StateError('Changing your email needs a Relic account session.');
-    }
-    await _maybeRefresh();
-    await SupabaseAuth.changeEmail(token, newEmail);
-  }
-
-  /// Email this account the link to the desktop app. The phone is the device
-  /// people install first and the computer is where Relic does the most, so
-  /// the first-run screen offers to put the link in their inbox rather than
-  /// asking them to type an address on a laptop later.
-  ///
-  /// The server holds the address and sends the mail; nothing is passed up
-  /// from here. 204 is a send, 429 means one went out recently, and 503 means
-  /// this server has no mail set up (a self-host without a mail key).
   Future<void> sendDownloadLink() async {
-    await _maybeRefresh();
     final r = await http
         .post(Uri.parse(_u('/account/send-download-link')), headers: _headers)
         .timeout(kNetTimeout);
@@ -1350,60 +1210,11 @@ class WorkerRepo implements RelicRepo {
   /// /account — full teardown). Local history on this device is untouched; the
   /// host runs its disconnect path afterward. Mirrors LocalDeskRepo.deleteAccount.
   Future<void> deleteAccount() async {
-    // Force-refresh: the worker rejects deletion on a token older than ~10
-    // minutes (stale_token), so mint a fresh one regardless of expiry.
-    await _maybeRefresh(force: true);
     final r = await http
         .delete(Uri.parse(_u('/account')), headers: _headers)
         .timeout(kNetTimeout);
     if (r.statusCode != 200 && r.statusCode != 204) {
       throw StateError('Could not delete your account (${r.statusCode}).');
-    }
-  }
-
-  /// Refresh the Supabase access token shortly before expiry. No-op outside
-  /// supabase mode or while still fresh (unless [force]). Called at the top of
-  /// [syncDelta]; forced by [deleteAccount] to satisfy the worker's fresh-token
-  /// requirement on destructive routes.
-  Future<void> _maybeRefresh({bool force = false}) async {
-    if (!_supabaseMode) return;
-    // A refresh already running: WAIT for it. Sailing on was the old behaviour
-    // and it meant the second caller carried the very token the first was in
-    // the middle of replacing — straight to a 401 on `/relics`, which this
-    // class reads as "offline".
-    final running = _refreshInFlight;
-    if (running != null) return running;
-    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    if (!force && now < _accessExpiry - 120) return;
-    final rt = _refreshToken;
-    if (rt == null) return;
-    final f = _refresh(rt);
-    _refreshInFlight = f;
-    try {
-      await f;
-    } finally {
-      _refreshInFlight = null;
-    }
-  }
-
-  Future<void> _refresh(String rt) async {
-    try {
-      final s = await SupabaseAuth.refresh(rt);
-      token = s.accessToken;
-      _accessExpiry = s.expiresAt;
-      if (s.refreshToken.isNotEmpty && s.refreshToken != rt) {
-        _refreshToken = s.refreshToken;
-        onSupabaseRefresh?.call(this);
-      }
-    } on SessionRevoked {
-      // Not retryable, ever. Drop the dead token so _maybeRefresh stops trying
-      // and the host can prompt for a fresh sign-in instead of showing a
-      // permanent "offline".
-      _refreshToken = null;
-      sessionRevoked.value = true;
-      _sync = const SyncState(SyncKind.offline);
-    } catch (_) {
-      _sync = const SyncState(SyncKind.offline);
     }
   }
 
@@ -1433,7 +1244,7 @@ class WorkerRepo implements RelicRepo {
   /// alongside it. Calling this before [loadLocal] overlaps the two: the
   /// refresh is in flight while the vault decrypts, and the first pass finds it
   /// done or joins it. Offline it fails quietly, exactly as the pass would.
-  void warmToken() => unawaited(_maybeRefresh());
+  void warmToken() {}
 
   Future<void> loadLocal() async {
     await _loadCache();
@@ -1506,12 +1317,6 @@ class WorkerRepo implements RelicRepo {
   bool _syncAgain = false;
 
   Future<void> _syncOnce() async {
-    // Refresh BEFORE opening the socket. The launch now binds with an
-    // already-expired access token (that's what keeps the network off the cold
-    // path), so starting the socket first would hand it an empty bearer,
-    // guarantee an auth failure, and make the live-sync doorbell wait out a
-    // backoff on every single launch.
-    await _maybeRefresh();
     _traceFirstSync('token ready');
     _ensureSocket();
     if (_mk == null) {
@@ -3045,76 +2850,6 @@ class WorkerRepo implements RelicRepo {
     if (!await writeSensitiveTextToClipboard(t)) {
       await Clipboard.setData(ClipboardData(text: t));
     }
-  }
-
-  // --- E2EE share links (mirrors LocalDeskRepo.createShare) ----------------
-  // The Worker gates /share behind the same auth as /relic, so a connected
-  // mobile repo (always signed in) can always create links. The share payload
-  // is sealed under a fresh per-share key (ShareCrypto) whose fragment rides in
-  // the URL — the server only ever sees ciphertext, and the vault MK is never
-  // involved (text is already in memory; blobs are decrypted via blobBytes).
-  @override
-  bool get canShare => token.isNotEmpty;
-
-  @override
-  Future<ShareLink> createShare(Relic r,
-      {required Duration ttl, required bool oneTime}) async {
-    if (!canShare) throw const ShareException('Sign in to create share links.');
-    Map<String, dynamic> payload;
-    if (r.kind == Kind.string) {
-      final t = r.content;
-      if (t == null || t.isEmpty) {
-        throw const ShareException('Nothing to share in this item.');
-      }
-      payload = {'v': 1, 'kind': 'text', 'text': t};
-    } else {
-      final bytes = await blobBytes(r);
-      if (bytes == null) {
-        throw const ShareException(
-            "This item's content isn't available on this device yet.");
-      }
-      payload = {
-        'v': 1,
-        'kind': r.kind == Kind.photo ? 'image' : 'file',
-        if (r.mime != null) 'mime': r.mime,
-        if (r.filename != null) 'name': r.filename,
-        'data': base64.encode(bytes),
-      };
-    }
-
-    await _maybeRefresh();
-    // One 409 retry: the id is client-minted so the AAD can bind it pre-upload;
-    // a collision just means mint again.
-    for (var attempt = 0; attempt < 2; attempt++) {
-      final id = ShareCrypto.mintId();
-      final sealed = await ShareCrypto.seal(id, payload);
-      final resp = await http.post(
-        Uri.parse(_u('/share')).replace(queryParameters: {
-          'id': id,
-          'ttl': '${ttl.inSeconds}',
-          if (oneTime) 'views': '1',
-        }),
-        headers: _headers,
-        body: sealed.wire,
-      ).timeout(netTimeoutForBytes(sealed.wire.length));
-      if (resp.statusCode == 200) {
-        final j = jsonDecode(resp.body) as Map<String, dynamic>;
-        return ShareLink(
-          '${j['url']}#${sealed.keyFragment}',
-          expiresAt: (j['expires_at'] as num).toInt(),
-          oneTime: oneTime,
-        );
-      }
-      if (resp.statusCode == 409) continue;
-      throw ShareException(switch (resp.statusCode) {
-        413 => 'Too large to share on your plan.',
-        402 => 'Share limit reached. Old links expire on their own.',
-        429 => 'Slow down a little. Try again in a minute.',
-        401 => 'Sign-in expired. Reconnect sync and try again.',
-        _ => "Couldn't create the link. Check your connection and try again.",
-      });
-    }
-    throw const ShareException("Couldn't create the link. Try again.");
   }
 
   @override

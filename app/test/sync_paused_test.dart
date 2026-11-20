@@ -11,7 +11,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:relic_app/data/supabase_auth.dart';
 import 'package:relic_app/data/sync_plan.dart';
 import 'package:relic_app/data/worker_repo.dart';
 import 'package:relic_app/widgets/chrome.dart' show SyncKind;
@@ -243,14 +242,9 @@ void main() {
     });
 
     Future<WorkerRepo> repo() async {
-      final r = await WorkerRepo.bindSupabaseWithMk(
+      final r = await WorkerRepo.bindWithMk(
         baseUrl: url,
-        session: const SupabaseSession(
-          accessToken: 't',
-          refreshToken: 'r',
-          expiresAt: 4102444800, // far future: never triggers a token refresh
-          userId: 'test-user',
-        ),
+        token: 't',
         mk: mk,
       );
       r.deviceId = 'phone';

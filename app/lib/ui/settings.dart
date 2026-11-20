@@ -30,9 +30,7 @@ import '../platform/running_apps.dart';
 import '../platform/shell.dart';
 import '../platform/store_safe.dart';
 import '../platform/tray_support.dart';
-import '../data/self_update.dart';
 import '../data/sift.dart' show SiftSidecar;
-import '../data/update_check.dart';
 import '../data/local_desk_repo.dart';
 import '../data/repo.dart';
 import '../models/relic.dart' show relativeAge, formatCaptureDate;
@@ -107,11 +105,6 @@ class _SettingsViewState extends State<SettingsView>
   // app version (single-sourced from pubspec via package_info_plus) + the
   // result of a manual "check for updates" tap.
   String _appVersion = '';
-  String _updateMsg = '';
-  bool _updateBusy = false;
-  bool _updateInstalling = false;
-  bool _updateFailed = false; // the check itself failed, ≠ "you're current"
-  UpdateInfo? _updateAvailable;
 
 
 
@@ -493,14 +486,6 @@ class _SettingsViewState extends State<SettingsView>
               repo.multiCombine,
               repo.setMultiCombine,
               sub: 'Pick several history items, then paste them as one block.',
-            ),
-            _toggleRow(
-              c,
-              'Clip reminders',
-              repo.reminders,
-              repo.setReminders,
-              sub: 'Set a reminder on any item and get a nudge later.',
-              last: !(Platform.isWindows || Platform.isMacOS),
             ),
             if (Platform.isWindows || Platform.isMacOS)
               _toggleRow(
@@ -2081,16 +2066,6 @@ class _SettingsViewState extends State<SettingsView>
         const SizedBox(height: 16),
         Row(
           children: [
-            _btn(
-              c,
-              _updateBusy ? 'Checking…' : 'Check for updates',
-              LucideIcons.refreshCw,
-              // Tappable even when the version is unknown: the check now
-              // reports that as a failure with a reason, which beats a dead
-              // button that looks like nothing happened.
-              onTap: _updateBusy ? null : _checkUpdates,
-            ),
-            const SizedBox(width: 10),
             _btn(c, 'Open logs', LucideIcons.fileText, onTap: _openLogs),
             const SizedBox(width: 10),
             _btn(
@@ -2117,58 +2092,6 @@ class _SettingsViewState extends State<SettingsView>
             ),
           ],
         ),
-        if (_updateMsg.isNotEmpty) ...[
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              Flexible(
-                child: Text(
-                  _updateMsg,
-                  style: RelicTheme.sans(
-                    size: 12,
-                    color: _updateAvailable != null
-                        ? c.accentMuted
-                        : _updateFailed
-                            ? c.warning
-                            : c.textMuted,
-                  ),
-                ),
-              ),
-              if (_updateAvailable != null) ...[
-                const SizedBox(width: 12),
-                _btn(
-                  c,
-                  'Update now',
-                  LucideIcons.download,
-                  accent: true,
-                  onTap: _updateInstalling ? null : _installUpdate,
-                ),
-              ] else if (_updateFailed) ...[
-                const SizedBox(width: 12),
-                _btn(
-                  c,
-                  'Open download page',
-                  LucideIcons.externalLink,
-                  onTap: () => _openUrl('https://relic.space/download/windows'),
-                ),
-              ],
-            ],
-          ),
-          // What's in it: the manifest's release notes, finally shown at the
-          // moment the user decides to update.
-          if (_updateAvailable?.notes case final notes?
-              when notes.trim().isNotEmpty) ...[
-            const SizedBox(height: 6),
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 440),
-              child: Text(
-                notes.trim(),
-                style: RelicTheme.sans(
-                    size: 11.5, color: c.textMuted, height: 1.45),
-              ),
-            ),
-          ],
-        ],
         const SizedBox(height: 16),
         Text(
           'Your content is encrypted with a key only you hold. The operator stores ciphertext and minimal metadata and cannot decrypt it.',
@@ -2226,52 +2149,6 @@ class _SettingsViewState extends State<SettingsView>
     });
   }
 
-  Future<void> _checkUpdates() async {
-    if (_updateBusy) return;
-    setState(() {
-      _updateBusy = true;
-      _updateMsg = '';
-      _updateAvailable = null;
-      _updateFailed = false;
-    });
-    final res = await checkForUpdate(_appVersion);
-    if (!mounted) return;
-    setState(() {
-      _updateBusy = false;
-      _updateAvailable = res.info;
-      _updateFailed = res.isFailed;
-      _updateMsg = switch (res.outcome) {
-        UpdateOutcome.available => 'Update available: ${res.info!.version}',
-        UpdateOutcome.upToDate => "You're on the latest version.",
-        UpdateOutcome.failed =>
-          "Couldn't check for updates. ${res.reason ?? ''}".trim(),
-      };
-    });
-  }
-
-  /// One-click in-place update: download → verify → silent installer →
-  /// the app exits and the new build relaunches into the tray by itself.
-  /// Anything that can't self-install (no sha256 in the manifest, non-
-  /// Windows, download failure) falls back to the browser download page.
-  Future<void> _installUpdate() async {
-    final info = _updateAvailable;
-    if (info == null || _updateInstalling) return;
-    setState(() => _updateInstalling = true);
-    try {
-      await installUpdate(info, onStatus: (s) {
-        if (mounted) setState(() => _updateMsg = s);
-      }); // no return on success: the app exits and relaunches
-    } catch (_) {
-      if (mounted) {
-        setState(() {
-          _updateInstalling = false;
-          _updateMsg = 'Could not update in place. Opening the download page.';
-        });
-      }
-      await _openUrl(info.url);
-    }
-  }
-
   Future<void> _openLogs() async {
     try {
       await revealInFileManager(crashLogDir());
@@ -2309,7 +2186,7 @@ class _SettingsViewState extends State<SettingsView>
         bearer: () async => widget.repo.syncBearer,
         selfLabel: Platform.localHostname,
         masterKey: widget.repo.masterKey,
-        accountId: widget.repo.supabaseUserId,
+        accountId: null,
         onRenameThisDevice: widget.onRenameThisDevice,
       ),
     ));
@@ -2323,16 +2200,10 @@ class _SettingsViewState extends State<SettingsView>
         masterKey: mk,
         accountEmail: widget.repo.accountEmail ?? '',
         onChangePassphrase: widget.repo.changePassphrase,
-        onChangeEmail:
-            widget.repo.isSupabase ? widget.repo.changeEmail : null,
-        onSignOutEverywhere:
-            widget.repo.isSupabase ? widget.repo.signOutEverywhere : null,
-        // Raw disconnect (the Disconnect button owns the confirmation); the
-        // sign-out-everywhere follow-through has already confirmed by the time
-        // it calls this.
+        onChangeEmail: null,
+        onSignOutEverywhere: null,
         onDisconnect: widget.onDisconnect,
-        onDeleteAccount:
-            widget.repo.isSupabase ? widget.repo.deleteAccount : null,
+        onDeleteAccount: null,
       ),
     ));
   }

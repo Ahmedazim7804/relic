@@ -217,22 +217,6 @@ class BillingException implements Exception {
   String toString() => message;
 }
 
-/// A created E2EE share link. The URL's fragment carries the decryption key —
-/// the server only ever saw ciphertext.
-class ShareLink {
-  final String url;
-  final int expiresAt; // unix seconds
-  final bool oneTime;
-  const ShareLink(this.url, {required this.expiresAt, required this.oneTime});
-}
-
-/// A share-creation failure with a message fit for the dialog.
-class ShareException implements Exception {
-  final String message;
-  const ShareException(this.message);
-  @override
-  String toString() => message;
-}
 
 /// A [Listenable] that never fires: the default for [RelicRepo.changes].
 /// Adding and removing listeners is a no-op, so a surface can subscribe
@@ -352,7 +336,6 @@ abstract class RelicRepo {
   // the popup can bind to them uniformly). LocalDeskRepo persists + implements.
   bool get multiCombine => false;
   bool get snippets => false;
-  bool get reminders => false;
 
   // The paste stack. Kept to the six members the picker actually binds to:
   // MemoryRepo `implements` rather than extends, so every addition here costs
@@ -375,14 +358,6 @@ abstract class RelicRepo {
   /// or running, so the UI can show a spinner instead of a bare row. Empty
   /// everywhere the local pipeline doesn't run.
   Set<String> get analyzingUids => const {};
-
-  /// Schedule a reminder (epoch ms); returns the new id or null. No-op default.
-  int? addReminder(String uid, int remindAtMs, {String? note}) => null;
-
-  /// Pending (un-fired) reminders for one item. Empty by default.
-  List<Reminder> remindersFor(String uid) => const [];
-
-  void clearReminder(int id) {}
 
   // --- windowed, query-driven result set the popup binds to ---
   /// The currently-loaded page window for the active query/scope (newest first).
@@ -497,15 +472,6 @@ abstract class RelicRepo {
 
   /// Whether this repo can create E2EE share links (signed in + sync
   /// configured). The ShareDialog's offline QR works regardless.
-  bool get canShare => false;
-
-  /// Encrypt [r] client-side and create a share link on the Worker. The
-  /// returned URL carries the decryption key in its fragment. Throws a
-  /// [ShareException] with a user-facing message on failure.
-  Future<ShareLink> createShare(Relic r,
-          {required Duration ttl, required bool oneTime}) async =>
-      throw UnsupportedError('sharing not available on this repo');
-
   /// Place the relic on the system clipboard. Text by default; repos with
   /// image blobs override to put the actual image back.
   Future<void> putOnClipboard(Relic r) async {
@@ -733,12 +699,6 @@ class MemoryRepo implements RelicRepo {
   }) async =>
       AttachmentEditResult.unsupported;
   @override
-  bool get canShare => false;
-  @override
-  Future<ShareLink> createShare(Relic r,
-          {required Duration ttl, required bool oneTime}) async =>
-      throw UnsupportedError('sharing not available on this repo');
-  @override
   List<Relic> get all => List.unmodifiable(_items);
   @override
   int get itemCount => _items.length;
@@ -815,8 +775,6 @@ class MemoryRepo implements RelicRepo {
   bool get multiCombine => false;
   @override
   bool get snippets => false;
-  @override
-  bool get reminders => false;
 
   @override
   Set<String> get provisionalTags => const {};
@@ -826,12 +784,6 @@ class MemoryRepo implements RelicRepo {
   /// everywhere the local pipeline doesn't run.
   @override
   Set<String> get analyzingUids => const {};
-  @override
-  int? addReminder(String uid, int remindAtMs, {String? note}) => null;
-  @override
-  List<Reminder> remindersFor(String uid) => const [];
-  @override
-  void clearReminder(int id) {}
   @override
   bool get syncEnabled => false;
   @override

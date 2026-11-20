@@ -11,7 +11,6 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:relic_crypto/relic_crypto.dart';
-import 'package:relic_app/data/supabase_auth.dart';
 import 'package:relic_app/data/worker_repo.dart';
 import 'package:relic_app/widgets/chrome.dart' show Scope;
 
@@ -26,14 +25,9 @@ void main() {
 
   final mk = Uint8List.fromList(List.generate(32, (i) => i * 7 & 0xff));
 
-  Future<WorkerRepo> repo() => WorkerRepo.bindSupabaseWithMk(
+  Future<WorkerRepo> repo() => WorkerRepo.bindWithMk(
         baseUrl: 'http://127.0.0.1:9', // discard port — flushes fail fast
-        session: const SupabaseSession(
-          accessToken: 't',
-          refreshToken: 'r',
-          expiresAt: 4102444800,
-          userId: 'test-user',
-        ),
+        token: 't',
         mk: mk,
         autoVault: true,
       );

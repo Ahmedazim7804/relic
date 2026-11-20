@@ -29,7 +29,7 @@ import '../widgets/fields.dart';
 Future<void> showConnectDialog(
   BuildContext context, {
   required RelicColors colors,
-  required VoidCallback onCloud,
+  VoidCallback? onCloud,
   required Future<String?> Function(String url, String pass, String? secret)
   onSelfHost,
 }) {
@@ -48,18 +48,18 @@ Future<void> showConnectDialog(
 enum _Health { unknown, checking, ok, bad }
 
 class _ConnectDialog extends StatefulWidget {
-  final VoidCallback onCloud;
+  final VoidCallback? onCloud;
   final Future<String?> Function(String url, String pass, String? secret)
   onSelfHost;
-  const _ConnectDialog({required this.onCloud, required this.onSelfHost});
+  const _ConnectDialog({this.onCloud, required this.onSelfHost});
 
   @override
   State<_ConnectDialog> createState() => _ConnectDialogState();
 }
 
 class _ConnectDialogState extends State<_ConnectDialog> {
-  int _step = 0; // 0 = destination chooser, 1 = self-host details
-  bool _cloud = true; // step-1 selection
+  int _step = 1; // 0 = destination chooser, 1 = self-host details
+  bool _cloud = false; // step-1 selection
 
   final _url = TextEditingController();
   final _pass = TextEditingController();
@@ -382,7 +382,7 @@ class _ConnectDialogState extends State<_ConnectDialog> {
       const SizedBox(height: Insets.xxl),
       Row(
         children: [
-          _ghost(c, 'Back', _busy ? null : () => setState(() => _step = 0)),
+          _ghost(c, 'Cancel', _busy ? null : () => Navigator.of(context).pop()),
           const Spacer(),
           _primary(
             c,

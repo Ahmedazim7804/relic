@@ -4,7 +4,6 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:relic_crypto/relic_crypto.dart';
-import 'package:relic_app/data/supabase_auth.dart';
 import 'package:relic_app/data/worker_repo.dart';
 import 'package:relic_app/widgets/chrome.dart' show SyncKind;
 
@@ -29,15 +28,9 @@ void main() {
 
   /// Exactly how mobile.dart binds when the token refresh could not be reached:
   /// no access token, expiry in the past, the stored refresh token carried over.
-  Future<WorkerRepo> offlineRepo() => WorkerRepo.bindSupabaseWithMk(
+  Future<WorkerRepo> offlineRepo() => WorkerRepo.bindWithMk(
         baseUrl: 'http://127.0.0.1:9', // discard port — every request fails
-        session: const SupabaseSession(
-          accessToken: '',
-          refreshToken: 'stored-refresh',
-          expiresAt: 0, // already expired -> _maybeRefresh retries each sync
-          userId: 'test-user',
-          email: 'user@example.com',
-        ),
+        token: '',
         mk: mk,
       );
 

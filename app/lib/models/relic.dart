@@ -165,17 +165,6 @@ int textByteSize(String plain, RichBody? rich,
     utf8.encode(plain).length + (rich?.encodedLength ?? 0) +
     (voice == null ? 0 : utf8.encode(jsonEncode(voice)).length);
 
-/// A pending clip reminder (local-only, never synced). `remindAt` is epoch
-/// milliseconds (DateTime.millisecondsSinceEpoch), independent of the
-/// seconds-based relic timestamps.
-class Reminder {
-  const Reminder(this.id, this.relicUid, this.remindAt, this.note);
-  final int id;
-  final String relicUid;
-  final int remindAt;
-  final String? note;
-}
-
 class Relic {
   final String uid;
   final int createdAt; // unix seconds

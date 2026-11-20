@@ -38,10 +38,7 @@ import 'data/device_directory.dart';
 import 'data/hotkeys.dart';
 import 'data/local_desk_repo.dart';
 import 'data/recovery.dart';
-import 'data/self_update.dart';
 import 'data/sync_plan.dart';
-import 'data/supabase_auth.dart';
-import 'data/update_check.dart';
 import 'models/relic.dart';
 import 'onboarding/add_device.dart';
 import 'onboarding/install_offer.dart';
@@ -210,7 +207,6 @@ class _RealAppState extends State<RealApp>
   /// surfaces that depend on it stay quiet until a real number lands.
   final ValueNotifier<int?> _deviceCount = ValueNotifier(null);
   bool _showingKit = false; // recovery-kit screen up: don't let blur hide it
-  bool _emailBannerDismissed = false; // verify-to-sync banner, session-only
   bool _syncWeekDismissed = false; // free-week countdown banner, session-only
   bool _syncPickBusy = false; // "Sync this PC instead" in flight
   DateTime? _shownAt; // when the popup was last summoned (guards blur-to-close)
@@ -230,17 +226,6 @@ class _RealAppState extends State<RealApp>
   // the default for tray/launch), read by the popup renderer + window sizing.
   final ValueNotifier<bool> _miniMode = ValueNotifier(false);
 
-  /// Background update-check cadence + once-per-version notification gate +
-  /// reentrancy guard for the one-click self-update.
-  Timer? _updateCheckTimer;
-  final _notifiedUpdates = <String>{};
-  bool _selfUpdating = false;
-
-  /// Last check's outcome, mirrored into the tray menu: the update that is
-  /// waiting (if any) and a one-line note. Both survive a dismissed or
-  /// suppressed notification.
-  UpdateInfo? _pendingUpdate;
-  String _lastUpdateNote = '';
   DateTime? _lastTooLargeNotice; // 1/hour throttle for the size-cap toast
 
   /// Ticked on every EXPLICIT close (Esc / X / tray click) → PopupView clears
@@ -296,43 +281,6 @@ class _RealAppState extends State<RealApp>
         'The limit is $limitMb MB. You can raise it in Settings.',
       );
     };
-    // Clip reminders: the repo sweep hands us the due rows (already marked
-    // fired). Coalesce a backlog into one toast; otherwise one rich toast per
-    // reminder whose click copies the item and surfaces the window.
-    widget.repo.onRemindersDue = (due) {
-      if (due.isEmpty) return;
-      if (due.length > 3) {
-        final n = actionableNotification(
-          title: 'Relic reminders',
-          body: 'You have ${due.length} reminders due.',
-          actionLabel: 'Open Relic',
-          onActivate: () => _show(Summon.notification),
-          isLinux: Platform.isLinux,
-        );
-        try {
-          n.show();
-        } catch (_) {}
-        return;
-      }
-      for (final rem in due) {
-        final r = widget.repo.relicByUid(rem.relicUid);
-        if (r == null) continue; // the item was deleted; skip quietly
-        final note = rem.note?.trim();
-        final n = actionableNotification(
-          title: (note != null && note.isNotEmpty) ? note : 'Reminder',
-          body: r.safeTitle,
-          actionLabel: 'Copy it',
-          onActivate: () async {
-            await widget.repo.putOnClipboard(r);
-            await _show(Summon.notification);
-          },
-          isLinux: Platform.isLinux,
-        );
-        try {
-          n.show();
-        } catch (_) {}
-      }
-    };
     _applyTrayVisibility();
     _initHotkeys();
     // Linux: our GTK bridge watches CLIPBOARD. The plugin watches PRIMARY
@@ -343,7 +291,6 @@ class _RealAppState extends State<RealApp>
     } else {
       clipboardWatcher.start();
     }
-    _scheduleUpdateChecks();
     // A relic:// link (cold or warm) surfaces the window, like a hotkey summon.
     DesktopLinks.onLink = _handleDeepLink;
     // First launch (empty, unconnected vault): the onboarding will welcome the
@@ -452,7 +399,7 @@ class _RealAppState extends State<RealApp>
         builder: (_) => AddDeviceScreen(
           masterKey: mk,
           bearer: () async => widget.repo.syncBearer,
-          accountId: widget.repo.supabaseUserId,
+          accountId: null,
           accountEmail: widget.repo.accountEmail,
         ),
       ),
@@ -484,7 +431,6 @@ class _RealAppState extends State<RealApp>
     widget.repo.onTrayVisibilityChanged = null;
     widget.repo.onAppearanceChanged = null;
     widget.repo.onCaptureTooLarge = null;
-    widget.repo.onRemindersDue = null;
     widget.repo.removeListener(_onRepoTick);
     windowManager.removeListener(this);
     trayManager.removeListener(this);
@@ -494,7 +440,6 @@ class _RealAppState extends State<RealApp>
       clipboardWatcher.removeListener(this);
       clipboardWatcher.stop();
     }
-    _updateCheckTimer?.cancel();
     _miniResizeTimer?.cancel();
     _pauseTimer?.cancel();
     _pausedSignal.dispose();
@@ -660,23 +605,6 @@ class _RealAppState extends State<RealApp>
                 ? 'Sync: connected'
                 : 'Connect to sync…',
           ),
-          // The tray menu is the one surface that cannot be swallowed by
-          // Focus Assist or a per-app notification block, so the last check's
-          // result lives here too — a missed toast used to mean an available
-          // update was simply never mentioned again.
-          if (_pendingUpdate case final u?)
-            MenuItem(
-              key: 'install_update',
-              label: 'Install update ${u.version}',
-            )
-          else
-            MenuItem(key: 'check_update', label: 'Check for updates…'),
-          if (_lastUpdateNote.isNotEmpty)
-            MenuItem(
-              key: 'update_note',
-              label: _lastUpdateNote,
-              disabled: true,
-            ),
           MenuItem.separator(),
           MenuItem(key: 'help', label: 'Help…'),
           MenuItem(key: 'quit', label: 'Quit Relic'),
@@ -1328,27 +1256,6 @@ class _RealAppState extends State<RealApp>
 
   /// Browser OAuth hands off to the system browser for the provider consent
   /// screen. Our popup is frameless and pinned always-on-top, so it sits over
-  /// that screen. Step aside on handoff ([away] true) and reappear on top once
-  /// the loopback callback lands ([away] false), so the sign-in is never buried
-  /// behind our window. We bypass [_hide] deliberately: no search reset, no
-  /// tray-hint notification (we come straight back), and connecting state stays
-  /// intact so the passphrase step shows the instant we return.
-  Future<void> _oauthBrowserHandoff(bool away) async {
-    try {
-      if (away) {
-        _visible = false;
-        await _dismiss();
-      } else {
-        await windowManager.setAlwaysOnTop(true);
-        // App mode: the browser is frontmost and we are coming back to finish
-        // the sign-in, so take the foreground (LSUIElement agents are refused a
-        // polite activation — [_present] asks forcefully).
-        await _present(foreground: true);
-        _visible = true;
-      }
-    } catch (_) {}
-  }
-
   /// Grow the mini picker into the full popup, in place. Used when the user
   /// asks for something the compact window has no room for (today: the editor,
   /// from the pencil on a mini row).
@@ -1969,12 +1876,6 @@ class _RealAppState extends State<RealApp>
         setState(() => _connecting = true);
         await _sizeWindow(520, 560);
         await _show(Summon.tray);
-      case 'check_update':
-        await _checkForUpdates();
-      case 'install_update':
-        if (_pendingUpdate case final u?) await _runSelfUpdate(u);
-      case 'update_note':
-        break; // disabled status line
       case 'help':
         await _openHelpPage('tray.menu');
       case 'pause_help':
@@ -1983,159 +1884,6 @@ class _RealAppState extends State<RealApp>
         await trayManager.destroy();
         await windowManager.destroy();
     }
-  }
-
-  /// First line of the release notes for the update notification — writing
-  /// notes into latest.json is finally visible to users.
-  static String _updateBody(UpdateInfo info) {
-    final first = info.notes
-        .split('\n')
-        .map((l) => l.trim())
-        .firstWhere((l) => l.isNotEmpty, orElse: () => '');
-    const tail = 'Click to update. Relic restarts by itself in a few seconds.';
-    return first.isEmpty ? tail : '$first\n$tail';
-  }
-
-  /// Manual update check from the tray. Reports the result as a native
-  /// notification; if an update exists, clicking it installs it in place
-  /// (download → verify → silent installer → auto-relaunch).
-  Future<void> _checkForUpdates() async {
-    var version = '';
-    try {
-      version = (await PackageInfo.fromPlatform()).version;
-    } catch (_) {}
-    final res = await checkForUpdate(version);
-    final info = res.info;
-    await _recordUpdateResult(res);
-    try {
-      final n = LocalNotification(
-        title: switch (res.outcome) {
-          UpdateOutcome.available => 'Update available: ${info!.version}',
-          UpdateOutcome.upToDate => 'Relic is up to date',
-          UpdateOutcome.failed => "Relic couldn't check for updates",
-        },
-        body: switch (res.outcome) {
-          UpdateOutcome.available => _updateBody(info!),
-          UpdateOutcome.upToDate => "You're on the latest version.",
-          UpdateOutcome.failed => res.reason ?? 'The check did not complete.',
-        },
-      );
-      if (info != null) {
-        n.onClick = () => _runSelfUpdate(info);
-      }
-      await n.show();
-    } catch (_) {}
-  }
-
-  /// Mirror a check's outcome into the tray menu. An available update becomes
-  /// a one-click "Install update X" entry that persists until it is taken, and
-  /// a failed check says so instead of leaving the last (possibly reassuring)
-  /// state standing.
-  Future<void> _recordUpdateResult(UpdateResult res) async {
-    if (!mounted) return;
-    final now = DateTime.now();
-    final at =
-        '${now.hour.toString().padLeft(2, '0')}:'
-        '${now.minute.toString().padLeft(2, '0')}';
-    final next = switch (res.outcome) {
-      UpdateOutcome.available => 'Checked $at',
-      UpdateOutcome.upToDate => 'Up to date, checked $at',
-      UpdateOutcome.failed => "Update check failed at $at",
-    };
-    if (identical(_pendingUpdate, res.info) && next == _lastUpdateNote) return;
-    _pendingUpdate = res.info;
-    _lastUpdateNote = next;
-    await _rebuildMenu();
-  }
-
-  /// Quiet background check: on launch (delayed, so startup stays instant)
-  /// and daily after that. Each remote version is announced ONCE per process
-  /// — the tray app runs for days, and a daily re-nag would teach people to
-  /// ignore it.
-  void _scheduleUpdateChecks() {
-    Future<void> tick() async {
-      if (_selfUpdating || !mounted) return;
-      var version = '';
-      try {
-        version = (await PackageInfo.fromPlatform()).version;
-      } catch (_) {}
-      final res = await checkForUpdate(version);
-      // Record first: the tray entry is how an available update stays visible
-      // after its one notification is gone, and how a machine that silently
-      // cannot reach the manifest finally says so.
-      await _recordUpdateResult(res);
-      final info = res.info;
-      if (info == null || !_notifiedUpdates.add(info.version)) return;
-      try {
-        final n = actionableNotification(
-          title: 'Relic ${info.version} is available',
-          body: _updateBody(info),
-          actionLabel: 'Update',
-          onActivate: () => _runSelfUpdate(info),
-          isLinux: Platform.isLinux,
-        );
-        await n.show();
-      } catch (_) {}
-    }
-
-    Future.delayed(const Duration(minutes: 2), tick);
-    _updateCheckTimer = Timer.periodic(
-      const Duration(hours: 24),
-      (_) => tick(),
-    );
-  }
-
-  /// The one-click update path: download the signed installer, verify its
-  /// manifest sha256, and hand off to the silent per-user install that
-  /// relaunches the app (self_update.dart). Any failure — including an old
-  /// manifest without a sha256 — falls back to the browser download page,
-  /// which is exactly what the click used to do.
-  Future<void> _runSelfUpdate(UpdateInfo info) async {
-    if (_selfUpdating) return;
-    _selfUpdating = true;
-    var announced = false;
-    try {
-      // The "we're on it" notification waits for the download to actually
-      // start. Only Windows has the silent in-place installer; everywhere else
-      // installUpdate throws before it touches the network, and promising a
-      // restart we are not going to do reads as a broken update.
-      await installUpdate(
-        info,
-        onStatus: (_) {
-          if (announced) return;
-          announced = true;
-          _notify(
-            'Updating Relic to ${info.version}',
-            'Downloading now. Relic will restart by itself.',
-          );
-        },
-      ); // no return on success: the app exits
-    } on SelfUpdateUnsupported {
-      // macOS ships a DMG you drag to Applications, so the browser is the
-      // install path here, not a failure.
-      _selfUpdating = false;
-      _notify(
-        'Relic ${info.version} is ready',
-        'Opening the download page in your browser.',
-      );
-      await _openDownloadPage(info);
-    } catch (_) {
-      _selfUpdating = false;
-      _notify(
-        'Update could not install itself',
-        'Opening the download page instead.',
-      );
-      await _openDownloadPage(info);
-    }
-  }
-
-  Future<void> _openDownloadPage(UpdateInfo info) async {
-    try {
-      await launchUrl(
-        Uri.parse(info.url),
-        mode: LaunchMode.externalApplication,
-      );
-    } catch (_) {}
   }
 
   /// Run a desktop connect action: rebuild the tray menu, dismiss the onboarding
@@ -2149,11 +1897,6 @@ class _RealAppState extends State<RealApp>
       await _sizeWindow(_popupDims.width, _popupDims.height);
       await _afterDesktopConnect();
       return null;
-    } on EmailConfirmationPending {
-      // Let the onboarding surface route to its confirm-your-email step rather
-      // than flattening this into an error string (which would strand the user
-      // with no session and no passphrase saved).
-      rethrow;
     } catch (e) {
       return e.toString();
     }
@@ -2190,7 +1933,6 @@ class _RealAppState extends State<RealApp>
       return DesktopOnboarding(
         startAtSignIn: _onboardStartAtSignIn,
         startReturning: _onboardStartReturning,
-        onBrowserHandoff: _oauthBrowserHandoff,
         // The Accessibility step drops the pin while the user is in System
         // Settings (else we cover the switch), and restores it on the way back.
         // _show also re-asserts the pin on every summon, so a missed restore
@@ -2209,51 +1951,12 @@ class _RealAppState extends State<RealApp>
           setState(() => _connecting = false);
           _sizeWindow(_popupDims.width, _popupDims.height);
         },
-        onSignInPassphrase: (email, password, passphrase) => _doDesktopConnect(
-          () => widget.repo.connectSupabase(
-            _workerUrl,
-            email,
-            password,
+        onConnectSelfHost: (url, passphrase, secret) => _doDesktopConnect(
+          () => widget.repo.connectSelfHost(
+            url,
             passphrase,
-            signUp: false,
+            enrollSecret: secret,
           ),
-        ),
-        onRecoveryKit: (email, password, kit, newPass) => _doDesktopConnect(
-          () => widget.repo.connectSupabaseWithKit(
-            _workerUrl,
-            email,
-            password,
-            kit,
-            newPass,
-          ),
-        ),
-        onOAuthCreate: (session, passphrase) => _doDesktopConnect(
-          () => widget.repo.connectSupabaseSession(
-            _workerUrl,
-            session,
-            passphrase,
-            allowCreate: true,
-          ),
-        ),
-        onOAuthUnlock: (session, passphrase) => _doDesktopConnect(
-          () => widget.repo.connectSupabaseSession(
-            _workerUrl,
-            session,
-            passphrase,
-            allowCreate: false,
-          ),
-        ),
-        onOAuthRecoveryKit: (session, kit, newPass) => _doDesktopConnect(
-          () => widget.repo.connectSupabaseSessionWithKit(
-            _workerUrl,
-            session,
-            kit,
-            newPass,
-          ),
-        ),
-        onPairedMk: (session, mk) => _doDesktopConnect(
-          () =>
-              widget.repo.connectSupabaseSessionWithMk(_workerUrl, session, mk),
         ),
       );
     }
@@ -2379,9 +2082,6 @@ class _RealAppState extends State<RealApp>
         if (widget.repo.sessionRevoked.value) {
           banners.add(_signedOutBanner());
         }
-        if (unverified && !_emailBannerDismissed) {
-          banners.add(_verifyBanner());
-        }
         // The free plan syncs one device. Not dismissible: sync stays off on
         // this PC until it is picked or the account pays.
         final paused = widget.repo.syncPaused.value;
@@ -2500,71 +2200,6 @@ class _RealAppState extends State<RealApp>
                   });
                   _sizeWindow(520, 560);
                 },
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _verifyBanner() {
-    final c = _useDark ? RelicColors.dark : RelicColors.light;
-    return Material(
-      color: c.panel,
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          border: Border(bottom: BorderSide(color: c.border, width: 1)),
-        ),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(
-            Insets.lg,
-            Insets.md,
-            Insets.sm,
-            Insets.md,
-          ),
-          child: Row(
-            children: [
-              Icon(LucideIcons.mailWarning, color: c.accent, size: 17),
-              const SizedBox(width: Insets.md),
-              Expanded(
-                child: Text(
-                  'Confirm your email to start syncing. Local use is unaffected.',
-                  style: RelicTheme.sans(
-                    size: 12.5,
-                    color: c.text,
-                    height: 1.35,
-                  ),
-                ),
-              ),
-              const SizedBox(width: Insets.sm),
-              GhostButton(
-                label: 'Resend email',
-                onTap: () async {
-                  final email = widget.repo.accountEmail;
-                  if (email == null || email.isEmpty) return;
-                  try {
-                    await SupabaseAuth.resendSignupConfirmation(email);
-                    if (mounted) {
-                      ScaffoldMessenger.of(
-                        context,
-                      ).showSnackBar(_snack(c, 'Confirmation email sent'));
-                    }
-                  } catch (_) {
-                    if (mounted) {
-                      ScaffoldMessenger.of(
-                        context,
-                      ).showSnackBar(_snack(c, 'Could not resend the email.'));
-                    }
-                  }
-                },
-              ),
-              const SizedBox(width: Insets.xs),
-              GhostIconButton(
-                icon: LucideIcons.x,
-                iconSize: 15,
-                tooltip: 'Dismiss',
-                onTap: () => setState(() => _emailBannerDismissed = true),
               ),
             ],
           ),

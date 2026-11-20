@@ -18,7 +18,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:relic_crypto/relic_crypto.dart';
 import 'package:relic_app/widgets/chrome.dart' show Scope;
-import 'package:relic_app/data/supabase_auth.dart';
 import 'package:relic_app/data/worker_repo.dart';
 
 class _RealNetwork extends HttpOverrides {}
@@ -120,14 +119,9 @@ void main() {
     } catch (_) {}
   });
 
-  Future<WorkerRepo> repo() => WorkerRepo.bindSupabaseWithMk(
+  Future<WorkerRepo> repo() => WorkerRepo.bindWithMk(
         baseUrl: 'http://127.0.0.1:9', // discard port: no network on the path
-        session: const SupabaseSession(
-          accessToken: 't',
-          refreshToken: 'r',
-          expiresAt: 4102444800,
-          userId: 'test-user',
-        ),
+        token: 't',
         mk: mk,
       );
 

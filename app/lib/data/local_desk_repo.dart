@@ -37,7 +37,6 @@ import 'pull_walk.dart';
 import 'sync_jobs.dart';
 import 'sync_plan.dart';
 import 'sync_socket.dart';
-import 'supabase_auth.dart';
 
 // titleAfterLabel and mergeAiRecord moved to the model when the phone needed
 // them too (it applies AI records without ever running the models). Re-exported
@@ -586,19 +585,8 @@ class LocalDeskRepo extends ChangeNotifier implements RelicRepo, BillingRepo {
   /// show the recovery kit once). Cleared after the host consumes it.
   bool vaultJustCreated = false;
 
-  // Supabase auth bridge (in-app sign-in). When _supabaseMode, _syncToken holds
-  // a short-lived access token refreshed from _refreshToken; the crypto scope is
-  // keyed off the stable user id, not the rotating token.
-  bool _supabaseMode = false;
-  String? _refreshToken;
-  int _accessExpiry = 0; // epoch seconds
-  bool _refreshing = false;
   String? _accountEmail;
   String? get accountEmail => _accountEmail;
-  /// The signed-in account email, used by the delete-account confirm field.
-  /// Lockstep alias with WorkerRepo.supabaseUserEmail so both hosts agree.
-  String? get supabaseUserEmail => _accountEmail;
-  String? _supabaseUserId;
 
   /// Set true when a sync write is refused with 403 email_unverified (the
   /// worker's VERIFY_GATE). Both hosts watch this to show the confirm-your-email
@@ -663,15 +651,6 @@ class LocalDeskRepo extends ChangeNotifier implements RelicRepo, BillingRepo {
       return false;
     }
   }
-
-  /// The Supabase user id (the crypto-scope `sub`), when connected via an
-  /// account session. Used to bind a pairing code/QR to this account. Null on a
-  /// legacy device-token connection.
-  String? get supabaseUserId => _supabaseUserId;
-
-  /// True when connected via a Supabase account session (not a legacy device
-  /// token) — gates the account-wide "sign out everywhere" action.
-  bool get isSupabase => _supabaseMode;
 
   // True when connected to a user's OWN self-hosted server (account-less,
   // passphrase-derived bearer over the device-token path). Drives the settings
@@ -762,11 +741,6 @@ class LocalDeskRepo extends ChangeNotifier implements RelicRepo, BillingRepo {
   /// blocklist skips stay silent by design). desktop.dart throttles + shows
   /// a native notification.
   void Function(int limitMb)? onCaptureTooLarge;
-
-  /// Fired by the reminder sweep when one or more reminders come due. The shell
-  /// shows a native toast (coalescing when there are many) whose click summons
-  /// the item onto the clipboard. Rows are already marked fired by the sweep.
-  void Function(List<Reminder> due)? onRemindersDue;
 
   /// Hotkey chords that failed to register (another app owns them), keyed
   /// 'history' | 'capture' | 'promote'. Settings shows a warning per row.
@@ -1314,10 +1288,8 @@ class LocalDeskRepo extends ChangeNotifier implements RelicRepo, BillingRepo {
   // docs/competitor-parity-features-2026-07.md.
   bool _multiCombine = false; // multi-select in the picker → combine & paste
   bool _snippets = false; // saved reusable text, surfaced as a picker facet
-  bool _reminders = false; // per-item reminders with a native toast
   bool _pasteAtCaret = false; // open the picker near the text cursor (desktop)
   bool _pasteStack = false; // queue items, then paste them one at a time
-  Timer? _reminderTimer; // sweep runs only while _reminders is on
 
   /// The paste stack: items queued for sequential pasting, head first.
   ///
@@ -1667,80 +1639,19 @@ class LocalDeskRepo extends ChangeNotifier implements RelicRepo, BillingRepo {
     notifyListeners();
   }
 
-  @override
-  bool get reminders => _reminders;
-  // Reminders own a periodic sweep (mirrors setMlEnrich): start + catch up on
-  // enable, cancel on disable. The sweep body no-ops if the toggle is off.
-  void setReminders(bool on) {
-    _reminders = on;
-    _savePrefs();
-    notifyListeners();
-    if (on) {
-      _startReminderSweep();
-    } else {
-      _reminderTimer?.cancel();
-      _reminderTimer = null;
-    }
-  }
-
   void setSummonApp(String? app) => _summonApp = app;
 
-  /// The app key the picker was summoned over — i.e. where a paste will land.
-  /// Linux needs it to pick the right paste chord (terminals take
-  /// Ctrl+Shift+V), which is also why linuxAppKey folds every terminal onto
-  /// the one 'terminal' key.
   String? get summonApp => _summonApp;
 
-  // --- Clip reminders plumbing ---
   static int get _nowMs => DateTime.now().millisecondsSinceEpoch;
 
-  /// Look an item up by uid (for the reminder toast's summon + copy).
   Relic? relicByUid(String uid) => _db?.getByUid(uid);
 
-  /// This repo already notifies on every mutation, so it is its own change
-  /// signal — see [RelicRepo.changes].
   @override
   Listenable get changes => this;
 
   @override
   Relic? byUid(String uid) => _db?.getByUid(uid);
-
-  /// Schedule a reminder; returns the row id (or null if the DB is unavailable).
-  @override
-  int? addReminder(String uid, int remindAtMs, {String? note}) =>
-      _db?.addReminder(uid, remindAtMs, note: note);
-
-  @override
-  List<Reminder> remindersFor(String uid) =>
-      _db?.remindersFor(uid) ?? const [];
-
-  @override
-  void clearReminder(int id) => _db?.clearReminder(id);
-
-  void _startReminderSweep() {
-    _reminderTimer?.cancel();
-    _reminderTimer =
-        Timer.periodic(const Duration(seconds: 45), (_) => _sweepReminders());
-    _sweepReminders(); // catch up immediately (covers reminders due while off)
-  }
-
-  void _sweepReminders() {
-    if (!_reminders || _disposed) return;
-    final db = _db;
-    if (db == null) return;
-    // Don't consume reminders until the shell is listening — otherwise a sweep
-    // that fires before onRemindersDue is installed would mark them fired and
-    // the toast would never show. Next tick retries once the shell is up.
-    final cb = onRemindersDue;
-    if (cb == null) return;
-    final due = db.dueReminders(_nowMs);
-    if (due.isEmpty) return;
-    // Mark fired before notifying so a re-entrant sweep can't double-fire them.
-    for (final r in due) {
-      db.markFired(r.id);
-    }
-    cb(due);
-  }
 
   /// Wipe everything personalized ranking has learned on this device.
   void clearPersonalMemory() {
@@ -1800,7 +1711,6 @@ class LocalDeskRepo extends ChangeNotifier implements RelicRepo, BillingRepo {
         _personalRank = j['personal_rank'] as bool? ?? true;
         _multiCombine = j['feature_multi_combine'] as bool? ?? false;
         _snippets = j['feature_snippets'] as bool? ?? false;
-        _reminders = j['feature_reminders'] as bool? ?? false;
         _pasteAtCaret = j['feature_paste_at_caret'] as bool? ?? false;
         _pasteStack = j['feature_paste_stack'] as bool? ?? false;
         _appearance = Appearance.byName(j['appearance'] as String?);
@@ -1921,7 +1831,6 @@ class LocalDeskRepo extends ChangeNotifier implements RelicRepo, BillingRepo {
           'personal_rank': _personalRank,
           'feature_multi_combine': _multiCombine,
           'feature_snippets': _snippets,
-          'feature_reminders': _reminders,
           'feature_paste_at_caret': _pasteAtCaret,
           'feature_paste_stack': _pasteStack,
           'appearance': _appearance.name,
@@ -1999,7 +1908,6 @@ class LocalDeskRepo extends ChangeNotifier implements RelicRepo, BillingRepo {
     _enrichTimer?.cancel();
     _secretClearTimer?.cancel();
     _backupTimer?.cancel();
-    _reminderTimer?.cancel();
     _sift?.dispose();
     _db?.dispose();
     super.dispose();
@@ -2084,14 +1992,6 @@ class LocalDeskRepo extends ChangeNotifier implements RelicRepo, BillingRepo {
       const Duration(hours: 12),
       (_) => _maybeAutoBackup(),
     );
-    // Clip reminders: if the toggle survived a restart, start the sweep. The
-    // first tick is delayed so the shell has installed onRemindersDue and any
-    // reminders that came due while the app was closed fire once (catch-up).
-    if (_reminders) {
-      Future.delayed(const Duration(seconds: 5), () {
-        if (!_disposed && _reminders) _startReminderSweep();
-      });
-    }
   }
 
   /// One-time import of the old flat JSON file into SQLite, then retire it.
@@ -2816,7 +2716,7 @@ class LocalDeskRepo extends ChangeNotifier implements RelicRepo, BillingRepo {
 
   /// True while the local vault is the "try without an account" demo (seeded
   /// samples, not yet connected). Drives the popup's sign-in banner.
-  bool get isDemo => _demoUids.isNotEmpty && !_supabaseMode;
+  bool get isDemo => _demoUids.isNotEmpty;
 
   /// "Try without an account": seed a few sample relics so the demo isn't empty.
   /// No-op once the vault has any content. Purely local — nothing is synced.
@@ -3854,75 +3754,6 @@ class LocalDeskRepo extends ChangeNotifier implements RelicRepo, BillingRepo {
     return p == null ? null : File(p).readAsBytesSync();
   }
 
-  /// Share links need an authenticated sync connection. Legacy device-token
-  /// installs count: the Worker gates /share behind the SAME auth as /relic,
-  /// so excluding them just told signed-in users they weren't signed in.
-  /// (The offline QR needs nothing.)
-  @override
-  bool get canShare => _syncToken != null && _syncUrl != null;
-
-  @override
-  Future<ShareLink> createShare(Relic r,
-      {required Duration ttl, required bool oneTime}) async {
-    if (!canShare) throw const ShareException('Sign in to create share links.');
-    // Build the plaintext payload (mirrors the recipient page's renderer).
-    Map<String, dynamic> payload;
-    if (r.kind == Kind.string) {
-      final t = r.content;
-      if (t == null || t.isEmpty) {
-        throw const ShareException('Nothing to share in this item.');
-      }
-      payload = {'v': 1, 'kind': 'text', 'text': t};
-    } else {
-      final bytes = await blobBytes(r);
-      if (bytes == null) {
-        throw const ShareException(
-            "This item's content isn't available on this device yet.");
-      }
-      payload = {
-        'v': 1,
-        'kind': r.kind == Kind.photo ? 'image' : 'file',
-        if (r.mime != null) 'mime': r.mime,
-        if (r.filename != null) 'name': r.filename,
-        'data': base64.encode(bytes),
-      };
-    }
-
-    await _maybeRefresh();
-    // One 409 retry: the id is client-minted so the AAD can bind it pre-upload;
-    // a collision just means mint again.
-    for (var attempt = 0; attempt < 2; attempt++) {
-      final id = ShareCrypto.mintId();
-      final sealed = await ShareCrypto.seal(id, payload);
-      final resp = await http.post(
-        Uri.parse(_u('/share')).replace(queryParameters: {
-          'id': id,
-          'ttl': '${ttl.inSeconds}',
-          if (oneTime) 'views': '1',
-        }),
-        headers: _h,
-        body: sealed.wire,
-      );
-      if (resp.statusCode == 200) {
-        final j = jsonDecode(resp.body) as Map<String, dynamic>;
-        return ShareLink(
-          '${j['url']}#${sealed.keyFragment}',
-          expiresAt: (j['expires_at'] as num).toInt(),
-          oneTime: oneTime,
-        );
-      }
-      if (resp.statusCode == 409) continue;
-      throw ShareException(switch (resp.statusCode) {
-        413 => 'Too large to share on your plan.',
-        402 => 'Share limit reached. Old links expire on their own.',
-        429 => 'Slow down a little. Try again in a minute.',
-        401 => 'Sign-in expired. Reconnect sync and try again.',
-        _ => "Couldn't create the link. Check your connection and try again.",
-      });
-    }
-    throw const ShareException("Couldn't create the link. Try again.");
-  }
-
   /// Export every relic (plus locally-present blob files) to
   /// `<destDir>/relic-export-<stamp>/` as `vault.json` + `blobs/`. Secrets are
   /// redacted (content AND preview nulled, `redacted: true`, blob skipped)
@@ -4948,197 +4779,6 @@ class LocalDeskRepo extends ChangeNotifier implements RelicRepo, BillingRepo {
     notifyListeners();
   }
 
-  /// Sign in (or sign up) with Supabase, then bind sync to the deployed Worker
-  /// using the Supabase access token as the bearer. The crypto scope is keyed off
-  /// the stable user id (not the rotating JWT); the long-lived refresh token is
-  /// stored so future launches reconnect without a password. The passphrase only
-  /// unwraps/creates the vault key and never leaves this device.
-  Future<void> connectSupabase(
-    String workerUrl,
-    String email,
-    String password,
-    String passphrase, {
-    bool signUp = false,
-  }) async {
-    final base = workerUrl.replaceAll(RegExp(r'/+$'), '');
-    final session = signUp
-        ? await SupabaseAuth.signUp(email, password)
-        : await SupabaseAuth.signIn(email, password);
-    if (session.userId.isEmpty) throw 'Sign-in did not return a user.';
-    final auth = {'Authorization': 'Bearer ${session.accessToken}'};
-    final resp = await http.get(Uri.parse('$base/keyparams'), headers: auth);
-    if (resp.statusCode == 401) {
-      throw 'Signed in, but the server rejected the session.';
-    }
-    Uint8List? mk;
-    if (resp.statusCode == 404) {
-      final (kp, newMk) = await RelicCrypto.createKeyParams(passphrase);
-      final put = await http.put(
-        Uri.parse('$base/keyparams'),
-        headers: {...auth, 'Content-Type': 'application/json'},
-        body: jsonEncode(kp),
-      );
-      if (put.statusCode != 200) {
-        throw 'Could not create the vault key (${put.statusCode}).';
-      }
-      mk = newMk;
-      vaultJustCreated = true; // host shows the recovery kit once
-    } else if (resp.statusCode == 200) {
-      mk = await RelicCrypto.unwrapMasterKey(
-        jsonDecode(resp.body) as Map<String, dynamic>,
-        passphrase,
-      );
-      if (mk == null) throw 'Wrong passphrase for this account.';
-    } else {
-      throw 'Server error ${resp.statusCode}.';
-    }
-    await _bindSupabaseSession(base, session, mk);
-  }
-
-  /// Shared bind tail: store secrets + config, set sync state, pull + flush.
-  Future<void> _bindSupabaseSession(
-      String base, SupabaseSession session, Uint8List key) async {
-    await _ensureDeviceId();
-    _purgeDemoSeed(); // demo samples must not sync into a real account
-    // Stable scope from the user id — survives access-token rotation.
-    final scope =
-        SecureKeyStore.scopeFor(base, 'supabase:${session.userId}');
-    // Store the long-lived REFRESH token (in the device-token slot) + the key.
-    if (!await _storeSyncSecrets(scope, session.refreshToken, key)) {
-      throw 'Could not store sync credentials in the OS credential store.';
-    }
-    _writeSyncConfig(
-      base,
-      scope,
-      authMode: 'supabase',
-      userId: session.userId,
-      email: session.email,
-    );
-    _deleteLegacyKeyFile();
-    _supabaseMode = true;
-    _syncUrl = base;
-    _syncToken = session.accessToken;
-    _refreshToken = session.refreshToken;
-    _accessExpiry = session.expiresAt;
-    _accountEmail = session.email;
-    _supabaseUserId = session.userId;
-    _syncScope = scope;
-    _mk = key;
-    final pushAll = _prepareBind('supabase:${session.userId}');
-    _startTimer();
-    notifyListeners();
-    unawaited(_initialSync(pushAll));
-  }
-
-  /// Sign in and unlock with a recovery kit (docs/cloudflare/13 §6): parse the
-  /// kit (the raw MK), re-wrap it under a new passphrase (PUT ?replace=1), bind.
-  Future<void> connectSupabaseWithKit(String workerUrl, String email,
-      String password, String kitText, String newPassphrase) async {
-    final base = workerUrl.replaceAll(RegExp(r'/+$'), '');
-    final session = await SupabaseAuth.signIn(email, password);
-    if (session.userId.isEmpty) throw 'Sign-in did not return a user.';
-    final mk = RecoveryKit.parse(kitText).mk; // throws RecoveryKitException
-    final kp = await RelicCrypto.rewrapKeyParams(mk, newPassphrase);
-    final put = await http.put(
-      Uri.parse('$base/keyparams?replace=1'),
-      headers: {
-        'Authorization': 'Bearer ${session.accessToken}',
-        'Content-Type': 'application/json',
-      },
-      body: jsonEncode(kp),
-    );
-    if (put.statusCode != 200) {
-      throw 'Could not re-wrap the vault key (${put.statusCode}).';
-    }
-    await _bindSupabaseSession(base, session, mk);
-  }
-
-  /// OAuth path: bind sync from an already-obtained Supabase [session] (the
-  /// browser PKCE flow in oauth_flow.dart), unwrapping/creating the vault with
-  /// [passphrase]. Mirrors [connectSupabase] but skips the email/password
-  /// sign-in. [allowCreate] gates whether a missing vault (404) is created (first
-  /// device) or an error — the caller pre-checks via OnboardingService.hasVault.
-  Future<void> connectSupabaseSession(
-    String workerUrl,
-    SupabaseSession session,
-    String passphrase, {
-    bool allowCreate = false,
-  }) async {
-    final base = workerUrl.replaceAll(RegExp(r'/+$'), '');
-    if (session.userId.isEmpty) throw 'Sign-in did not return a user.';
-    final auth = {'Authorization': 'Bearer ${session.accessToken}'};
-    final resp = await http.get(Uri.parse('$base/keyparams'), headers: auth);
-    if (resp.statusCode == 401) {
-      throw 'Signed in, but the server rejected the session.';
-    }
-    Uint8List? mk;
-    if (resp.statusCode == 404) {
-      if (!allowCreate) throw 'No vault found for this account.';
-      final (kp, newMk) = await RelicCrypto.createKeyParams(passphrase);
-      final put = await http.put(
-        Uri.parse('$base/keyparams'),
-        headers: {...auth, 'Content-Type': 'application/json'},
-        body: jsonEncode(kp),
-      );
-      if (put.statusCode != 200) {
-        throw 'Could not create the vault key (${put.statusCode}).';
-      }
-      mk = newMk;
-      vaultJustCreated = true; // host shows the recovery kit once
-    } else if (resp.statusCode == 200) {
-      mk = await RelicCrypto.unwrapMasterKey(
-        jsonDecode(resp.body) as Map<String, dynamic>,
-        passphrase,
-      );
-      if (mk == null) throw 'Wrong passphrase for this account.';
-    } else {
-      throw 'Server error ${resp.statusCode}.';
-    }
-    await _bindSupabaseSession(base, session, mk);
-  }
-
-  /// OAuth + recovery-kit door: bind from [session], re-wrapping the kit's master
-  /// key under [newPassphrase]. Mirrors [connectSupabaseWithKit] without sign-in.
-  Future<void> connectSupabaseSessionWithKit(
-    String workerUrl,
-    SupabaseSession session,
-    String kitText,
-    String newPassphrase,
-  ) async {
-    final base = workerUrl.replaceAll(RegExp(r'/+$'), '');
-    if (session.userId.isEmpty) throw 'Sign-in did not return a user.';
-    final mk = RecoveryKit.parse(kitText).mk; // throws RecoveryKitException
-    final kp = await RelicCrypto.rewrapKeyParams(mk, newPassphrase);
-    final put = await http.put(
-      Uri.parse('$base/keyparams?replace=1'),
-      headers: {
-        'Authorization': 'Bearer ${session.accessToken}',
-        'Content-Type': 'application/json',
-      },
-      body: jsonEncode(kp),
-    );
-    if (put.statusCode != 200) {
-      throw 'Could not re-wrap the vault key (${put.statusCode}).';
-    }
-    await _bindSupabaseSession(base, session, mk);
-  }
-
-  /// OAuth + pairing door: bind from [session] with a master key already obtained
-  /// over the pairing handshake (the desktop "use another device" flow). Mirrors
-  /// [connectSupabaseSessionWithKit] but WITHOUT re-wrapping keyparams — the
-  /// trusted device's keyparams already validate this MK (the caller ran
-  /// OnboardingService.verifyPairedMk first), and a new device must never
-  /// overwrite the account's keyparams.
-  Future<void> connectSupabaseSessionWithMk(
-    String workerUrl,
-    SupabaseSession session,
-    Uint8List mk,
-  ) async {
-    final base = workerUrl.replaceAll(RegExp(r'/+$'), '');
-    if (session.userId.isEmpty) throw 'Sign-in did not return a user.';
-    await _bindSupabaseSession(base, session, mk);
-  }
-
   /// Rotate the vault passphrase (docs/cloudflare/13 §7): re-wrap the in-memory
   /// master key under a new passphrase and PUT ?replace=1. No data is
   /// re-encrypted; the recovery kit stays valid.
@@ -5157,135 +4797,12 @@ class LocalDeskRepo extends ChangeNotifier implements RelicRepo, BillingRepo {
     }
   }
 
-  /// Sign out on ALL devices (docs/cloudflare/13 §7): revoke every refresh token
-  /// for this account at the IdP. Other devices drop offline as their access
-  /// tokens expire (~1h); this device's refresh token is revoked too. The caller
-  /// should follow up with [disconnectSync] to fully sign out here.
-  Future<void> signOutEverywhere() async {
-    final tok = _syncToken;
-    if (!_supabaseMode || tok == null) {
-      throw 'Signing out everywhere needs a Relic account session.';
-    }
-    await SupabaseAuth.signOutGlobal(tok);
-    _refreshToken = null;
-  }
-
-  /// Change the login (account) email at the IdP. GoTrue emails a confirmation
-  /// link to both the current and the new address; the change lands only once
-  /// confirmed, so this session keeps working meanwhile. The vault key is
-  /// untouched (auth != vault). Mirrors WorkerRepo.changeEmail.
-  Future<void> changeEmail(String newEmail) async {
-    await _maybeRefresh();
-    final tok = _syncToken;
-    if (!_supabaseMode || tok == null) {
-      throw 'Changing your email needs a Relic account session.';
-    }
-    await SupabaseAuth.changeEmail(tok, newEmail);
-  }
-
-  /// Permanently delete the synced vault + account on the server (DELETE
-  /// /account — full teardown). Local history on this computer is untouched; the
-  /// caller follows up with [disconnectSync]. Mirrors WorkerRepo.deleteAccount.
   Future<void> deleteAccount() async {
     final base = _syncUrl;
     if (base == null) throw 'Connect first.';
-    // Force-refresh: the worker rejects deletion on a token older than ~10
-    // minutes (stale_token), so mint a fresh one regardless of expiry.
-    await _refreshAccess();
     final r = await http.delete(Uri.parse('$base/account'), headers: _h);
     if (r.statusCode != 200 && r.statusCode != 204) {
       throw 'Could not delete your account (${r.statusCode}).';
-    }
-  }
-
-  /// Reconnect a persisted Supabase session: exchange the stored refresh token
-  /// for a fresh access token, then bind sync. No passphrase needed.
-  Future<void> _autoConnectSupabase(
-    Map<String, dynamic> cfg,
-    String scope,
-  ) async {
-    final refreshTok = await _keyStore.getRefreshToken(scope);
-    final key = await _keyStore.getMasterKey(scope);
-    if (refreshTok == null || key == null || key.length != 32) return;
-    await _ensureDeviceId();
-    SupabaseSession s;
-    try {
-      s = await SupabaseAuth.refresh(refreshTok);
-    } catch (_) {
-      return; // refresh expired → user must sign in again
-    }
-    _supabaseMode = true;
-    _refreshToken = s.refreshToken.isEmpty ? refreshTok : s.refreshToken;
-    _accessExpiry = s.expiresAt;
-    _accountEmail = (cfg['email'] as String?) ?? s.email;
-    _supabaseUserId = (cfg['user_id'] as String?) ?? s.userId;
-    if (s.refreshToken.isNotEmpty && s.refreshToken != refreshTok) {
-      try {
-        await _keyStore.putRefreshToken(scope, s.refreshToken);
-      } catch (_) {} // rotation persist is best-effort, like the old bool
-    }
-    _writeSyncConfig(
-      _syncUrl!,
-      scope,
-      authMode: 'supabase',
-      userId: cfg['user_id'] as String?,
-      email: _accountEmail,
-    );
-    _syncToken = s.accessToken;
-    _syncScope = scope;
-    _mk = key;
-    // Reconnecting the stored account: teach pre-guard installs which account
-    // their data belongs to, so a later switch is detectable.
-    final id = 'supabase:$_supabaseUserId';
-    if (_syncedAccount != id) {
-      _syncedAccount = id;
-      _savePrefs();
-    }
-    _loadCursors();
-    await _syncCycle();
-    _startTimer();
-    notifyListeners();
-  }
-
-  /// Refresh the Supabase access token shortly before it expires. No-op outside
-  /// Supabase mode or when the token is still fresh. Called every sync cycle.
-  Future<void> _maybeRefresh() async {
-    if (!_supabaseMode || _refreshing) return;
-    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    if (now < _accessExpiry - 120) return;
-    await _refreshAccess();
-  }
-
-  Future<void> _refreshAccess() async {
-    final rt = _refreshToken;
-    if (!_supabaseMode || _refreshing || rt == null) return;
-    _refreshing = true;
-    try {
-      final s = await SupabaseAuth.refresh(rt);
-      _syncToken = s.accessToken;
-      _accessExpiry = s.expiresAt;
-      if (s.refreshToken.isNotEmpty && s.refreshToken != rt) {
-        _refreshToken = s.refreshToken;
-        final scope = _syncScope;
-        if (scope != null) {
-          try {
-            await _keyStore.putRefreshToken(scope, s.refreshToken);
-          } catch (_) {} // best-effort, must not flip _online
-        }
-      }
-    } on SessionRevoked {
-      // Terminal, unlike every other refresh failure: GoTrue has thrown the
-      // session away, so the next cycle would retry a token that can never
-      // work. Drop it and let the host ask for a real sign-in.
-      appendSyncLog('token refresh refused: session revoked, sign-in required');
-      _refreshToken = null;
-      sessionRevoked.value = true;
-      _online = false;
-    } catch (e) {
-      appendSyncLog('token refresh failed: $e');
-      _online = false; // next cycle retries; persistent failure → re-sign-in
-    } finally {
-      _refreshing = false;
     }
   }
 
@@ -5305,18 +4822,11 @@ class LocalDeskRepo extends ChangeNotifier implements RelicRepo, BillingRepo {
               ? null
               : SecureKeyStore.scopeFor(_syncUrl!, legacyToken));
       if (scope == null) return;
-      if ((cfg['auth_mode'] as String? ?? 'device') == 'supabase') {
-        await _autoConnectSupabase(cfg, scope);
-        return;
-      }
       final token = await _keyStore.getRefreshToken(scope) ?? legacyToken;
       final key = await _keyStore.getMasterKey(scope) ?? _readLegacyKeyBytes();
       if (token == null || key == null || key.length != 32) return;
       await _ensureDeviceId();
       if (!await _storeSyncSecrets(scope, token, key)) return;
-      // Self-host reconnects exactly like the cloud device-token path (token +
-      // MK already in the keystore, no passphrase needed); only the mode flag
-      // and the settings-pane branch differ, so preserve it across the rewrite.
       final mode = cfg['mode'] as String? ?? 'cloud';
       _selfHost = mode == 'selfhost';
       _writeSyncConfig(_syncUrl!, scope, mode: mode);
@@ -5324,7 +4834,6 @@ class LocalDeskRepo extends ChangeNotifier implements RelicRepo, BillingRepo {
       _syncToken = token;
       _syncScope = scope;
       _mk = key;
-      // Same pre-guard stamp as _autoConnectSupabase, legacy identity form.
       final id = 'legacy:$scope';
       if (_syncedAccount != id) {
         _syncedAccount = id;
@@ -5346,10 +4855,7 @@ class LocalDeskRepo extends ChangeNotifier implements RelicRepo, BillingRepo {
     _pause.clear();
     _online = false;
     _clearFailureStreak();
-    _supabaseMode = false;
     _selfHost = false;
-    _refreshToken = null;
-    _accessExpiry = 0;
     _accountEmail = null;
     try {
       final scope = _syncScope ?? _syncScopeFromConfig();
@@ -5484,7 +4990,6 @@ class LocalDeskRepo extends ChangeNotifier implements RelicRepo, BillingRepo {
   }
 
   Future<void> _syncCycle() async {
-    await _maybeRefresh();
     await _flushPending();
     await _pullRemote();
   }
@@ -5855,7 +5360,6 @@ class LocalDeskRepo extends ChangeNotifier implements RelicRepo, BillingRepo {
           // refresh will mint a working one, because the refresh tokens went
           // with it. Say so instead of sitting on "offline".
           if (resp.statusCode == 401 && isSessionRevokedBody(resp.body)) {
-            _refreshToken = null;
             sessionRevoked.value = true;
           }
           // The free plan syncs another device. Reachable, not offline.

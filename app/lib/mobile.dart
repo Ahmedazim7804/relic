@@ -17,16 +17,12 @@ import 'data/boot_trace.dart';
 import 'data/device_directory.dart';
 import 'data/help_urls.dart';
 import 'data/model_download.dart';
-import 'data/oauth_flow.dart';
 import 'data/onnx_query_encoder.dart';
 import 'data/pairing_link.dart';
 import 'data/query_encoder.dart';
 import 'data/repo.dart';
-import 'data/review_prompt.dart';
 import 'data/save_prefs.dart';
 import 'data/secure_key_store.dart';
-import 'data/share_dedup.dart';
-import 'data/supabase_auth.dart';
 import 'data/sync_plan.dart';
 import 'data/wifi_watch.dart';
 import 'data/worker_repo.dart';
@@ -98,19 +94,6 @@ class _Creds {
   static Future<void> markPhoneExpectationSeen() =>
       _s.write(key: _kPhoneExpectation, value: '1');
 
-  // Fingerprints of recently shared photos and files, and the item each one
-  // landed on, so sharing the same thing again moves that item to the top
-  // instead of storing a copy. See [ShareDedup]. Kept out of [clear] so it
-  // survives disconnect/reconnect.
-  static const _kShareSeen = 'relic.share.seen';
-  static Future<Map<String, SeenShare>> shareSeen() async =>
-      ShareDedup.decode(await _s.read(key: _kShareSeen));
-  static Future<void> setShareSeen(Map<String, SeenShare> seen) async {
-    try {
-      await _s.write(key: _kShareSeen, value: ShareDedup.encode(seen));
-    } catch (_) {}
-  }
-
   static Future<({String url, String token, String pass})?> read() async {
     final url = await _s.read(key: _kUrl);
     final token = await _s.read(key: _kToken);
@@ -129,34 +112,9 @@ class _Creds {
         _s.delete(key: _kEmail),
       ]);
 
-  // --- Supabase sign-in persistence ---
   static Future<String> authMode() async =>
       (await _s.read(key: _kAuthMode)) ?? 'token';
 
-  /// Persist a Supabase session WITHOUT the cleartext passphrase. The unwrapped
-  /// master key is cached in the OS key store instead (see SecureKeyStore), so we
-  /// reconnect silently without re-deriving from the passphrase.
-  static Future<void> saveSupabaseNoPass(
-    String url,
-    String refresh,
-    String? userId,
-    String? email,
-  ) =>
-      Future.wait([
-        _s.write(key: _kAuthMode, value: 'supabase'),
-        _s.write(key: _kUrl, value: url),
-        _s.write(key: _kRefresh, value: refresh),
-        _s.write(key: _kUserId, value: userId ?? ''),
-        _s.write(key: _kEmail, value: email ?? ''),
-      ]);
-
-  /// Drop the legacy cleartext passphrase once its master key is cached.
-  static Future<void> dropLegacyPass() => _s.delete(key: _kPass);
-
-  /// Persist a self-host connection. Reuses the device-token storage (url +
-  /// passphrase-derived bearer + passphrase) since self-host reconnects via the
-  /// same path; `authMode='selfhost'` only flips the UI/branching. The bearer is
-  /// derived once at connect and stored, so relaunch skips the Argon2 pass.
   static Future<void> saveSelfHost(String url, String token, String pass) =>
       Future.wait([
         _s.write(key: _kAuthMode, value: 'selfhost'),
@@ -164,35 +122,6 @@ class _Creds {
         _s.write(key: _kToken, value: token),
         _s.write(key: _kPass, value: pass),
       ]);
-
-  /// Read the persisted session (no passphrase required). `legacyPass` is the old
-  /// cleartext passphrase if a pre-migration install still has one.
-  static Future<
-      ({String url, String refresh, String? userId, String? email, String? legacyPass})?> readSupabaseSession() async {
-    // Concurrent, not sequential: every read is a platform-channel round trip
-    // into the Android Keystore, and five of them in series was pure latency in
-    // front of the launch screen.
-    final v = await Future.wait([
-      _s.read(key: _kUrl),
-      _s.read(key: _kRefresh),
-      _s.read(key: _kUserId),
-      _s.read(key: _kEmail),
-      _s.read(key: _kPass),
-    ]);
-    final url = v[0];
-    final refresh = v[1];
-    if (url == null || refresh == null) return null;
-    return (
-      url: url,
-      refresh: refresh,
-      userId: v[2],
-      email: v[3],
-      legacyPass: v[4],
-    );
-  }
-
-  static Future<void> updateRefresh(String refresh) =>
-      _s.write(key: _kRefresh, value: refresh);
 
   // --- device-local preferences (kept out of [clear] so they survive a
   // disconnect/reconnect) ---
@@ -391,9 +320,6 @@ class _MobileAppState extends State<MobileApp> with WidgetsBindingObserver {
   // The bottom sheet must open from a context *below* MaterialApp's Navigator;
   // this key gives us one (the State's own context is above it).
   final _navKey = GlobalKey<NavigatorState>();
-  // The one-time store rating request after the tenth capture. Off on every
-  // platform but Android and iOS (see [reviewPromptSupported]).
-  final _review = ReviewPrompt();
 
   Timer? _poll; // live refresh while the app is foregrounded
   bool _refreshing = false; // guard against overlapping loads
@@ -541,52 +467,11 @@ class _MobileAppState extends State<MobileApp> with WidgetsBindingObserver {
   }
 
   Future<void> _autoConnectInner() async {
-    // Supabase mode: bind silently (cached master key, or a one-time legacy
-    // passphrase migration). See [_silentSupabaseRepo].
-    final mode = await _Creds.authMode();
-    BootTrace.mark('auth mode');
-    if (mode == 'supabase') {
-      final repo = await _silentSupabaseRepo();
-      BootTrace.mark('repo bound');
-      if (repo == null) {
-        // A returning user whose silent reconnect failed (expired refresh /
-        // offline / can't unlock): land on the browse-only state with a
-        // "Reconnect" button rather than the full onboarding wall.
-        if (mounted) {
-          setState(() {
-            _booting = false;
-            _browseOnly = true;
-            _reconnectMode = true;
-          });
-        }
-        return;
-      }
-      // loadLocal, NOT load: `load` also awaits syncDelta (token refresh,
-      // outbox flush, /account, the paginated /relics pull), so the splash used
-      // to sit there until the server answered — with the whole vault already
-      // decryptable on disk. The sync still runs, it just runs behind the UI:
-      // _onConnected -> _startPolling fires _silentRefresh immediately.
-      try {
-        await repo.loadLocal();
-      } catch (_) {/* corrupt/absent cache: open empty, the sync fills it */}
-      BootTrace.mark('vault ready');
-      if (!mounted) return;
-      setState(() {
-        _repo = repo;
-        _booting = false;
-      });
-      BootTrace.mark('list shown');
-      _onConnected(repo);
-      return;
-    }
-
     final saved = await _Creds.read();
     if (saved == null) {
       if (mounted) setState(() => _booting = false);
       return;
     }
-    // Self-host reconnects exactly like the legacy device-token path (the
-    // persisted token is the passphrase-derived bearer); only the flag differs.
     final selfHost = await _Creds.authMode() == 'selfhost';
     final repo = WorkerRepo(
       baseUrl: saved.url,
@@ -595,10 +480,6 @@ class _MobileAppState extends State<MobileApp> with WidgetsBindingObserver {
     );
     repo.isSelfHost = selfHost;
     try {
-      // Local-only, same as the Supabase branch above. This path still has to
-      // unwrap the master key from the passphrase (there's no cached MK in
-      // device-token / self-host mode), but _ensureKey falls back to the cached
-      // keyparams, so it works offline too.
       await repo.loadLocal();
       if (!mounted) return;
       setState(() {
@@ -607,149 +488,12 @@ class _MobileAppState extends State<MobileApp> with WidgetsBindingObserver {
       });
       _onConnected(repo);
     } catch (e) {
-      // Never unlocked on this device (no cached keyparams) or a bad
-      // passphrase — nothing decryptable to show. Fall back to the connect
-      // screen (prefilled).
       if (mounted) setState(() => _booting = false);
     }
   }
 
-  /// Bind a connected repo from the persisted session, using the cached master
-  /// key (no passphrase). If only a legacy cleartext passphrase is stored,
-  /// derive the key once, cache it, and drop the passphrase. Returns null when
-  /// it can't unlock silently (re-onboard).
-  ///
-  /// The common case does NO network at all. Everything needed to open and
-  /// decrypt the vault — the user id, the master key, the relic cache — is
-  /// already on the device, so a cold launch has no reason to wait on Supabase.
-  Future<WorkerRepo?> _silentSupabaseRepo() async {
-    // Concurrent: both are platform-channel reads and neither needs the other.
-    final (s, deviceId) = await (
-      _Creds.readSupabaseSession(),
-      DeviceId.get(),
-    ).wait;
-    BootTrace.mark('session read');
-    if (s == null) return null;
-
-    final storedId = s.userId;
-    if (storedId != null && storedId.isNotEmpty) {
-      final scope = SecureKeyStore.scopeFor(s.url, storedId);
-      final mk = await _keyStore.getMasterKey(scope);
-      BootTrace.mark('master key');
-      if (mk != null) {
-        // Bind against the cached key with an already-expired access token plus
-        // the stored refresh token. _maybeRefresh runs at the top of every
-        // syncDelta, so the first sync mints a fresh access token behind the
-        // UI — online or off, the launch itself never blocks on it. Offline,
-        // the app simply keeps working from cache until a sync gets through.
-        final repo = await WorkerRepo.bindSupabaseWithMk(
-          baseUrl: s.url,
-          session: SupabaseSession(
-            accessToken: '',
-            refreshToken: s.refresh,
-            expiresAt: 0, // already expired → _maybeRefresh mints on first sync
-            userId: storedId,
-            email: s.email,
-          ),
-          mk: mk,
-          deviceLabel: _deviceName,
-          autoVault: _autoVault,
-          deviceId: deviceId,
-        );
-        repo.onSupabaseRefresh = (r) => _Creds.updateRefresh(r.refreshToken ?? '');
-        // The token refresh goes out now, while the cache decrypts behind
-        // it, so the first sync is not a round trip late before it starts.
-        repo.warmToken();
-        return repo;
-      }
-    }
-
-    // Slow path, and the only one that needs a network round trip to launch:
-    // either this install predates the stored user id, or it still has a
-    // cleartext passphrase and no cached master key (pre-migration). Both are
-    // one-time; once the key is cached, every later launch takes the fast path
-    // above. Offline here really does mean "can't open", because there is no
-    // key on the device to decrypt with.
-    final SupabaseSession session;
-    try {
-      session = await SupabaseAuth.refresh(s.refresh);
-      await _Creds.updateRefresh(session.refreshToken);
-    } catch (_) {
-      return null;
-    }
-    final userId = session.userId;
-    if (userId.isEmpty) return null;
-    final scope = SecureKeyStore.scopeFor(s.url, userId);
-    final mk = await _keyStore.getMasterKey(scope);
-
-    try {
-      WorkerRepo repo;
-      if (mk != null) {
-        repo = await WorkerRepo.bindSupabaseWithMk(
-          baseUrl: s.url,
-          session: session,
-          mk: mk,
-          deviceLabel: _deviceName,
-          autoVault: _autoVault,
-          deviceId: deviceId,
-        );
-      } else if (s.legacyPass != null && s.legacyPass!.isNotEmpty) {
-        repo = await WorkerRepo.fromSession(
-          baseUrl: s.url,
-          session: session,
-          passphrase: s.legacyPass!,
-          deviceLabel: _deviceName,
-          autoVault: _autoVault,
-          deviceId: deviceId,
-        );
-        if (repo.masterKey != null) {
-          await _keyStore.putMasterKey(scope, repo.masterKey!);
-          await _Creds.dropLegacyPass();
-        }
-      } else {
-        return null;
-      }
-      repo.onSupabaseRefresh = (r) => _Creds.updateRefresh(r.refreshToken ?? '');
-      // Backfill what sent us down this path, so it's a one-time cost. Without
-      // this, an install that predates the stored user id would need the
-      // network on EVERY launch — exactly the thing being fixed.
-      await _Creds.saveSupabaseNoPass(
-        s.url,
-        repo.refreshToken ?? s.refresh,
-        userId,
-        session.email ?? s.email,
-      );
-      return repo;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  /// Onboarding completed: persist the session (no cleartext passphrase) and
-  /// cache the master key so future launches reconnect silently, then connect.
   Future<void> _persistAndConnect(WorkerRepo repo) async {
-    // Self-host: no account/refresh token — persist the device-token trio (url +
-    // passphrase-derived bearer + passphrase) so relaunch reconnects silently.
-    if (repo.isSelfHost) {
-      await _Creds.saveSelfHost(repo.baseUrl, repo.token, repo.passphrase);
-      if (mounted) setState(() => _repo = repo);
-      _onConnected(repo);
-      return;
-    }
-    await _Creds.saveSupabaseNoPass(
-      repo.baseUrl,
-      repo.refreshToken ?? '',
-      repo.supabaseUserId,
-      repo.accountEmail,
-    );
-    final uid = repo.supabaseUserId;
-    final mk = repo.masterKey;
-    if (uid != null && mk != null) {
-      await _keyStore.putMasterKey(
-          SecureKeyStore.scopeFor(repo.baseUrl, uid), mk);
-    }
-    await _Creds.dropLegacyPass();
-    repo.onSupabaseRefresh = (r) => _Creds.updateRefresh(r.refreshToken ?? '');
+    await _Creds.saveSelfHost(repo.baseUrl, repo.token, repo.passphrase);
     if (mounted) setState(() => _repo = repo);
     _onConnected(repo);
   }
@@ -863,46 +607,6 @@ class _MobileAppState extends State<MobileApp> with WidgetsBindingObserver {
                     'Your vault is safe on this device.',
                     style: RelicTheme.sans(
                         size: 12.5, color: c.text, height: 1.35)),
-              ),
-            ],
-          ),
-        ),
-      );
-
-  Widget _verifyBanner(RelicColors c) => Material(
-        color: c.surface,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 8, 6, 8),
-          child: Row(
-            children: [
-              Icon(LucideIcons.mailWarning, color: c.accent, size: 18),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                    'Confirm your email to start syncing. Local use is unaffected.',
-                    style: RelicTheme.sans(
-                        size: 12.5, color: c.text, height: 1.35)),
-              ),
-              TextButton(
-                onPressed: () async {
-                  final email = _repo?.accountEmail;
-                  if (email == null || email.isEmpty) return;
-                  try {
-                    await SupabaseAuth.resendSignupConfirmation(email);
-                    _toast('Confirmation email sent');
-                  } catch (_) {
-                    _toast('Could not resend the email.');
-                  }
-                },
-                child: Text('Resend',
-                    style: RelicTheme.sans(
-                        size: 13,
-                        color: c.accentMuted,
-                        weight: FontWeight.w600)),
-              ),
-              IconButton(
-                icon: Icon(LucideIcons.x, size: 16, color: c.textMuted),
-                onPressed: () => setState(() => _emailBannerDismissed = true),
               ),
             ],
           ),
@@ -1422,8 +1126,6 @@ class _MobileAppState extends State<MobileApp> with WidgetsBindingObserver {
     _lastLinkAt = now;
     if (pair != null) {
       _handlePairLink(pair);
-    } else if (uri.host == 'auth-callback') {
-      OAuthFlow.deliverMobileCallback(uri); // browser OAuth code -> onboarding
     } else if (uri.host == 'capture' || uri.path.contains('capture')) {
       _captureFromTrigger(uri);
     }
@@ -1475,17 +1177,6 @@ class _MobileAppState extends State<MobileApp> with WidgetsBindingObserver {
     // Boot finished without a repo (offline, browse-only, expired session):
     // nothing else owns the cache now, so a standalone capture repo is safe.
     if (_captureRepo != null) return _captureRepo;
-    if (await _Creds.authMode() == 'supabase') {
-      final repo = await _silentSupabaseRepo();
-      if (repo != null) {
-        repo.maskSecrets = _maskSecrets;
-        repo.onUserCapture = _onUserCapture;
-        // Must precede any capture: _push saves the whole cache, so an unprimed
-        // repo would write a one-item vault over the real one. See primeCache.
-        await repo.primeCache();
-        return _captureRepo = repo;
-      }
-    }
     final saved = await _Creds.read();
     if (saved == null) return null;
     final repo = WorkerRepo(
@@ -1613,15 +1304,10 @@ class _MobileAppState extends State<MobileApp> with WidgetsBindingObserver {
   /// say so, or it looks lost.
   Future<void> _captureShared(WorkerRepo repo, List<SharedMediaFile> files,
       {bool live = true}) async {
-    final seen = await _Creds.shareSeen();
-    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     var added = 0, moved = 0, failed = 0, tooBig = 0;
-    var dirty = false;
     for (final f in files) {
       try {
         if (f.type == SharedMediaType.text || f.type == SharedMediaType.url) {
-          // captureText finds an identical text item and bumps it itself; the
-          // only thing to work out here is which of the two it did.
           final bump = repo.holdsText(f.path);
           if (await repo.captureText(f.path)) {
             if (bump) {
@@ -1634,37 +1320,18 @@ class _MobileAppState extends State<MobileApp> with WidgetsBindingObserver {
           }
           continue;
         }
-        // An image or any other file (PDF, zip, video, …) → an image/file
-        // relic. Both are read whole into memory, so check the per-item cap
-        // against the file's length BEFORE the read: the server would
-        // reject an oversized item anyway, and a giant readAsBytes can take
-        // the whole app down long before it gets that answer.
         if (await File(f.path).length() > repo.maxItemBytes) {
           tooBig++;
           continue;
         }
         final bytes = await File(f.path).readAsBytes();
         final image = f.type == SharedMediaType.image;
-        final fp = ShareDedup.fingerprint(image ? 'img' : 'file', bytes);
-        // Shared before, and the item is still here: bring it to the top.
-        final known = ShareDedup.uidFor(seen, fp);
-        if (known != null && await repo.resurface(known)) {
-          seen[fp] = SeenShare(now, known);
-          dirty = true;
-          moved++;
-          continue;
-        }
-        // Otherwise store it. Only a capture that actually landed is
-        // remembered: a failed one that was would be treated as a re-share
-        // of an item that does not exist on every retry for 90 days.
         final uid = image
             ? await repo.captureImage(bytes,
                 mime: mimeType(f), filename: _basename(f.path))
             : await repo.captureFile(bytes,
                 mime: mimeType(f), filename: _basename(f.path));
         if (uid != null) {
-          seen[fp] = SeenShare(now, uid);
-          dirty = true;
           added++;
         } else {
           failed++;
@@ -1673,7 +1340,6 @@ class _MobileAppState extends State<MobileApp> with WidgetsBindingObserver {
         failed++;
       }
     }
-    if (dirty) await _Creds.setShareSeen(ShareDedup.prune(seen, now));
     if ((added > 0 || moved > 0) && mounted) {
       setState(() {});
       _toast(moved == 0
@@ -1682,7 +1348,6 @@ class _MobileAppState extends State<MobileApp> with WidgetsBindingObserver {
               ? (moved == 1 ? 'Moved to the top' : '$moved moved to the top')
               : '$added added, $moved moved to the top');
     } else if (tooBig > 0 && mounted) {
-      // Say WHY nothing landed, or the refusal reads as a bug.
       final mb = repo.maxItemBytes ~/ (1024 * 1024);
       _toast(tooBig == 1
           ? 'Too big to keep — Relic items are capped at $mb MB'
@@ -1694,29 +1359,7 @@ class _MobileAppState extends State<MobileApp> with WidgetsBindingObserver {
 
   String? mimeType(SharedMediaFile f) => f.mimeType;
 
-  /// A new item the user made on this phone landed (see
-  /// [WorkerRepo.onUserCapture]). Counts it, and on the tenth asks the store
-  /// for a rating once things have settled.
-  void _onUserCapture() {
-    unawaited(() async {
-      if (!await _review.recordCapture()) return;
-      // Let the "added" toast finish and any share batch wind down first.
-      await Future<void>.delayed(const Duration(seconds: 3));
-      await _review.askIfDue(calm: _calmForReview);
-    }());
-  }
-
-  /// Nothing else is on screen: the app is in front, the vault is open, and
-  /// no dialog, sheet, upgrade notice, editor or first-run screen sits on top
-  /// of the list. Anything else waits for a later capture.
-  bool _calmForReview() {
-    if (!mounted || _repo == null) return false;
-    if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
-      return false;
-    }
-    final nav = _navKey.currentState;
-    return nav != null && !nav.canPop();
-  }
+  void _onUserCapture() {}
   String _basename(String path) => path.split(RegExp(r'[\\/]')).last;
 
   void _toast(String msg, {int seconds = 2}) {
@@ -1894,7 +1537,7 @@ class _MobileAppState extends State<MobileApp> with WidgetsBindingObserver {
                             builder: (_) => AddDeviceScreen(
                                 masterKey: mk,
                                 bearer: () async => r.token,
-                                accountId: r.supabaseUserId)));
+                                accountId: null)));
                       }
                     }),
                     _sheetItem(colors, LucideIcons.smartphone, 'Your devices', () {
@@ -1927,16 +1570,12 @@ class _MobileAppState extends State<MobileApp> with WidgetsBindingObserver {
                                   masterKey: mk,
                                   accountEmail: r.accountEmail ?? '',
                                   onChangePassphrase: r.changePassphrase,
-                                  onChangeEmail:
-                                      r.isSupabase ? r.changeEmail : null,
-                                  onSignOutEverywhere: r.isSupabase
-                                      ? r.signOutEverywhere
-                                      : null,
+                                  onChangeEmail: null,
+                                  onSignOutEverywhere: null,
                                   // Raw disconnect for the sign-out-everywhere
                                   // follow-through (already confirmed there).
                                   onDisconnect: _disconnect,
-                                  onDeleteAccount:
-                                      r.isSupabase ? r.deleteAccount : null,
+                                  onDeleteAccount: null,
                                 )));
                       }
                     }),
@@ -2708,8 +2347,6 @@ class _MobileAppState extends State<MobileApp> with WidgetsBindingObserver {
       final weekLine = syncWeekLine(until);
       final banners = <Widget>[
         if (_repo!.sessionRevoked.value) _signedOutBanner(colors),
-        if (_repo!.emailUnverified.value && !_emailBannerDismissed)
-          _verifyBanner(colors),
         // The free plan syncs one device. Not dismissible: sync stays off
         // here until this phone is picked or the account pays.
         if (paused != null)

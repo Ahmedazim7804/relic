@@ -20,7 +20,6 @@ import 'ui/dialogs.dart';
 import 'ui/onboarding.dart';
 import 'ui/popup.dart';
 import 'ui/settings.dart';
-import 'ui/share_dialog.dart';
 import 'ui/toast.dart';
 import 'widgets/brand.dart';
 import 'widgets/controls.dart';
@@ -66,7 +65,6 @@ enum Surface {
   dialogConfirm('Dialog · confirm'),
   dialogEdit('Dialog · item'),
   dialogEditImage('Dialog · item image'),
-  share('Dialog · share'),
   toasts('Toasts'),
   components('Components'),
   connect('Connect (live data)');
@@ -230,7 +228,6 @@ class _GalleryAppState extends State<GalleryApp> {
               onCancel: () {},
               onCopy: () {},
               onDelete: () {},
-              onShare: () {},
               onSave: (t, n, u, m, c2, a, rm) async {},
             ));
       case Surface.dialogEditImage:
@@ -243,14 +240,7 @@ class _GalleryAppState extends State<GalleryApp> {
               onCancel: () {},
               onCopy: () {},
               onDelete: () {},
-              onShare: () {},
               onSave: (t, n, u, m, c2, a, rm) async {},
-            ));
-      case Surface.share:
-        return _seeded((r) => ShareDialog(
-              relic: r,
-              repo: _repo,
-              onClose: () {},
             ));
       case Surface.toasts:
         // The real ToastStack, driven by a pre-enqueued ToastQueue — one toast

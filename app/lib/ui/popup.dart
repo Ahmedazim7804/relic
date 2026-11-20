@@ -31,7 +31,6 @@ import '../widgets/relic_mark.dart';
 import '../widgets/result_row.dart';
 import '../platform/sound.dart';
 import 'dialogs.dart';
-import 'share_dialog.dart';
 import 'toast.dart';
 
 /// How tall the history strip is in the mini picker, where it is always one
@@ -92,29 +91,6 @@ bool showAddPhoneNudge({
     deviceCount == 1 &&
     itemCount >= addPhoneNudgeThreshold &&
     !shown;
-
-/// "2 days, 3 hours from now" — the two largest non-zero units of the gap
-/// between now and [remindAtMs], up to months. Used in the reminder-set toast.
-String _relativeFromNow(int remindAtMs) {
-  var mins = (remindAtMs - DateTime.now().millisecondsSinceEpoch) ~/ 60000;
-  if (mins < 1) return 'less than a minute from now';
-  final months = mins ~/ (60 * 24 * 30);
-  mins -= months * 60 * 24 * 30;
-  final days = mins ~/ (60 * 24);
-  mins -= days * 60 * 24;
-  final hours = mins ~/ 60;
-  mins -= hours * 60;
-  final parts = <String>[];
-  void add(int v, String unit) {
-    if (v > 0) parts.add('$v $unit${v == 1 ? '' : 's'}');
-  }
-
-  add(months, 'month');
-  add(days, 'day');
-  add(hours, 'hour');
-  add(mins, 'minute');
-  return '${parts.take(2).join(', ')} from now';
-}
 
 /// A one-shot "open this relic in the editor" request, created fresh per
 /// save & annotate hotkey press. Identity-compared (the SAME relic can be
@@ -1571,37 +1547,6 @@ class _PopupViewState extends State<PopupView> {
     (widget.onPick ?? widget.onClose)();
   }
 
-  /// Open the reminder scheduler for [r] (feature_reminders). Re-renders after
-  /// a clear so the scheduled list stays current without closing the dialog.
-  void _openRemind(Relic r) {
-    void show() {
-      final pending = [
-        for (final rem in widget.repo.remindersFor(r.uid))
-          (rem.id, rem.remindAt),
-      ];
-      _setDialog(RemindDialog(
-        preview: r.safeTitle,
-        pending: pending,
-        onCancel: () => _setDialog(null),
-        onClear: (id) {
-          widget.repo.clearReminder(id);
-          show();
-        },
-        onPick: (ms) {
-          widget.repo.addReminder(r.uid, ms);
-          _setDialog(null);
-          _toasts.show(ToastMsg(
-            'Reminder set for ${_relativeFromNow(ms)}',
-            severity: ToastSeverity.success,
-            icon: LucideIcons.alarmClock,
-          ));
-        },
-      ));
-    }
-
-    show();
-  }
-
   /// Open a link relic in the system browser. Shown only for items that
   /// contain a URL; falls back to a toast if the link can't be launched.
   Future<void> _openLink(Relic r) async {
@@ -2259,14 +2204,6 @@ class _PopupViewState extends State<PopupView> {
     final List<Widget> mainRows = mob
         ? [
             _MenuRow(
-                label: 'Share',
-                icon: LucideIcons.share2,
-                height: rowH,
-                onTap: () {
-                  close();
-                  _share(r);
-                }),
-            _MenuRow(
                 label: 'Edit',
                 icon: LucideIcons.squarePen,
                 height: rowH,
@@ -2340,14 +2277,6 @@ class _PopupViewState extends State<PopupView> {
                   close();
                   _promote(r);
                 }),
-            _MenuRow(
-                label: 'Share',
-                icon: LucideIcons.share2,
-                height: rowH,
-                onTap: () {
-                  close();
-                  _share(r);
-                }),
             if (canCopyAs)
               _MenuRow(
                   label: 'Copy as',
@@ -2355,15 +2284,6 @@ class _PopupViewState extends State<PopupView> {
                   submenu: true,
                   height: rowH,
                   onTap: () => setState(() => _rowMenuSub = true)),
-            if (widget.repo.reminders)
-              _MenuRow(
-                  label: 'Remind me…',
-                  icon: LucideIcons.alarmClock,
-                  height: rowH,
-                  onTap: () {
-                    close();
-                    _openRemind(r);
-                  }),
             if (widget.repo.relicSync(r) == RelicSync.blocked)
               _MenuRow(
                   label: 'Retry sync',
@@ -2619,18 +2539,6 @@ class _PopupViewState extends State<PopupView> {
     ));
   }
 
-  /// Share dialog: offline QR + E2EE link (see share_dialog.dart). Routed
-  /// through _setDialog so blur-to-close suspends while it's up.
-  void _share(Relic r) {
-    _setDialog(
-      ShareDialog(
-        relic: r,
-        repo: widget.repo,
-        onClose: () => _setDialog(null),
-      ),
-    );
-  }
-
   /// Open the "+" composer to author a new relic by hand.
   void _compose() {
     _setDialog(
@@ -2691,7 +2599,6 @@ class _PopupViewState extends State<PopupView> {
           _setDialog(null);
           _copy(live);
         },
-        onShare: () => _share(live),
         onDelete: () {
           _setDialog(null);
           _delete(live);

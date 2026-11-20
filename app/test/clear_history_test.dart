@@ -4,7 +4,6 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:relic_crypto/relic_crypto.dart';
 import 'package:relic_app/data/personal_store.dart';
-import 'package:relic_app/data/supabase_auth.dart';
 import 'package:relic_app/data/worker_repo.dart';
 
 // Offline WorkerRepo harness: bindSupabaseWithMk sets the master key without
@@ -25,14 +24,9 @@ void main() {
   final mk = Uint8List.fromList(List.generate(32, (i) => i * 7 & 0xff));
 
   Future<WorkerRepo> repo({bool autoVault = true}) =>
-      WorkerRepo.bindSupabaseWithMk(
+      WorkerRepo.bindWithMk(
         baseUrl: 'http://127.0.0.1:9', // discard port — flushes fail fast
-        session: const SupabaseSession(
-          accessToken: 't',
-          refreshToken: 'r',
-          expiresAt: 4102444800, // 2100 — never "expired" mid-test
-          userId: 'test-user',
-        ),
+        token: 't',
         mk: mk,
         autoVault: autoVault,
       );

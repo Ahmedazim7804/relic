@@ -13,7 +13,6 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:relic_app/data/supabase_auth.dart';
 import 'package:relic_app/data/worker_repo.dart';
 import 'package:relic_app/widgets/chrome.dart';
 
@@ -77,14 +76,9 @@ void main() {
 
   tearDown(() => server.close(force: true));
 
-  Future<WorkerRepo> repo() => WorkerRepo.bindSupabaseWithMk(
+  Future<WorkerRepo> repo() => WorkerRepo.bindWithMk(
         baseUrl: url,
-        session: const SupabaseSession(
-          accessToken: 't',
-          refreshToken: 'r',
-          expiresAt: 4102444800, // far future: never triggers a token refresh
-          userId: 'test-user',
-        ),
+        token: 't',
         mk: mk,
       );
 

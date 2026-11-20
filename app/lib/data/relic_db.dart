@@ -274,24 +274,6 @@ class RelicDb {
         PRIMARY KEY (app, kind, key)
       );
     ''');
-    // Clip reminders (local-only, never synced — the `upsert` wire column list
-    // and `pending_ops` never reference this table, so it stays off the wire
-    // like query_memory/context_memory). `remind_at` is epoch MILLISECONDS
-    // (DateTime.now().millisecondsSinceEpoch), self-contained and independent of
-    // the repo's seconds-based `_now`.
-    db.execute('''
-      CREATE TABLE IF NOT EXISTS reminders (
-        id INTEGER PRIMARY KEY,
-        relic_uid TEXT NOT NULL,
-        remind_at INTEGER NOT NULL,
-        note TEXT,
-        fired INTEGER NOT NULL DEFAULT 0
-      );
-    ''');
-    db.execute(
-      'CREATE INDEX IF NOT EXISTS reminders_due '
-      'ON reminders (fired, remind_at);',
-    );
     // Where a copy came from: the window title, the page link and the words
     // around the selection, read at copy time (platform/copy_context.dart).
     // DEVICE-ONLY by design: it can hold text the user never copied (other
@@ -2600,54 +2582,6 @@ class RelicDb {
     final rs = _db.select('SELECT updated_at FROM relics WHERE uid = ?', [uid]);
     return rs.isEmpty ? null : rs.first['updated_at'] as int;
   }
-
-  // --- Clip reminders (local-only) ---
-  // remindAtMs / nowMs are epoch milliseconds. Reminders never sync (this table
-  // is off the wire; see the CREATE in _migrate).
-
-  /// Schedule a reminder for [uid] at [remindAtMs]; returns the new row id.
-  int addReminder(String uid, int remindAtMs, {String? note}) {
-    _db.execute(
-      'INSERT INTO reminders (relic_uid, remind_at, note, fired) '
-      'VALUES (?, ?, ?, 0)',
-      [uid, remindAtMs, note],
-    );
-    return _db.lastInsertRowId;
-  }
-
-  Reminder _toReminder(Row r) => Reminder(
-        r['id'] as int,
-        r['relic_uid'] as String,
-        r['remind_at'] as int,
-        r['note'] as String?,
-      );
-
-  /// Un-fired reminders whose time has arrived (`remind_at <= nowMs`), oldest
-  /// first.
-  List<Reminder> dueReminders(int nowMs) {
-    final rs = _db.select(
-      'SELECT id, relic_uid, remind_at, note FROM reminders '
-      'WHERE fired = 0 AND remind_at <= ? ORDER BY remind_at',
-      [nowMs],
-    );
-    return [for (final r in rs) _toReminder(r)];
-  }
-
-  /// Pending (un-fired) reminders for one item.
-  List<Reminder> remindersFor(String uid) {
-    final rs = _db.select(
-      'SELECT id, relic_uid, remind_at, note FROM reminders '
-      'WHERE relic_uid = ? AND fired = 0 ORDER BY remind_at',
-      [uid],
-    );
-    return [for (final r in rs) _toReminder(r)];
-  }
-
-  void markFired(int id) =>
-      _db.execute('UPDATE reminders SET fired = 1 WHERE id = ?', [id]);
-
-  void clearReminder(int id) =>
-      _db.execute('DELETE FROM reminders WHERE id = ?', [id]);
 
   /// Find an existing text relic with identical content (for capture dedupe).
   /// Held rows are invisible here on purpose: matching one would swallow the

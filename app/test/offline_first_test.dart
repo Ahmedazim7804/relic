@@ -5,7 +5,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:relic_crypto/relic_crypto.dart';
 import 'package:relic_app/data/net.dart';
-import 'package:relic_app/data/supabase_auth.dart';
 import 'package:relic_app/data/worker_repo.dart';
 import 'package:relic_app/widgets/chrome.dart' show Scope;
 
@@ -107,15 +106,9 @@ void main() {
       };
     }
 
-    Future<WorkerRepo> repoAt(String baseUrl) => WorkerRepo.bindSupabaseWithMk(
+    Future<WorkerRepo> repoAt(String baseUrl) => WorkerRepo.bindWithMk(
           baseUrl: baseUrl,
-          session: const SupabaseSession(
-            accessToken: '',
-            refreshToken: 'stored-refresh',
-            expiresAt: 0,
-            userId: 'test-user',
-            email: 'user@example.com',
-          ),
+          token: '',
           mk: mk,
         );
 
@@ -222,15 +215,9 @@ void main() {
 
     // Discard port: every request fails transiently, which is what "offline"
     // looks like to the repo.
-    Future<WorkerRepo> offlineRepo() => WorkerRepo.bindSupabaseWithMk(
+    Future<WorkerRepo> offlineRepo() => WorkerRepo.bindWithMk(
           baseUrl: 'http://127.0.0.1:9',
-          session: const SupabaseSession(
-            accessToken: '',
-            refreshToken: 'stored-refresh',
-            expiresAt: 0,
-            userId: 'test-user',
-            email: 'user@example.com',
-          ),
+          token: '',
           mk: mk,
         );
 
