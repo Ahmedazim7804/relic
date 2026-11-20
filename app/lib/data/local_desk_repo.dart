@@ -5364,13 +5364,6 @@ class LocalDeskRepo extends ChangeNotifier implements RelicRepo, BillingRepo {
     notifyListeners();
   }
 
-  // With the doorbell live, the poll is only a safety net (missed wake, dropped
-  // socket), so it widens; when the socket is down (self-host, offline, or
-  // pre-connect) it stays tight so nothing is left waiting.
-  Duration get _pollInterval => (_syncSocket?.connected ?? false)
-      ? const Duration(seconds: 45)
-      : const Duration(seconds: 8);
-
   /// The live-sync doorbell: a wake nudge means "pull now". Guards inside
   /// [_pullRemote] coalesce this with the periodic cycle.
   void _onWake() {
@@ -5384,8 +5377,13 @@ class LocalDeskRepo extends ChangeNotifier implements RelicRepo, BillingRepo {
       headers: () => _h,
       onWake: _onWake,
       onConnectedChanged: (up) {
-        _startTimer(); // re-arm the poll at the new cadence
-        if (up) unawaited(_pullRemote()); // catch up on anything missed
+        if (up) {
+          _syncTimer?.cancel();
+          _syncTimer = null;
+          unawaited(_pullRemote());
+        } else {
+          _startTimer();
+        }
       },
       holding: () => _pause.holding,
     );
@@ -5395,8 +5393,12 @@ class LocalDeskRepo extends ChangeNotifier implements RelicRepo, BillingRepo {
   void _startTimer() {
     _ensureSocket();
     _syncTimer?.cancel();
+    if (_syncSocket?.connected ?? false) {
+      _syncTimer = null;
+      return;
+    }
     _syncTimer = Timer.periodic(
-      _pollInterval,
+      const Duration(seconds: 60),
       (_) => _syncCycle(),
     );
   }
@@ -5940,7 +5942,7 @@ class LocalDeskRepo extends ChangeNotifier implements RelicRepo, BillingRepo {
       if (_applyPendingAiRecords(db)) changed = true;
       _online = true;
       _lastSyncAt = _now;
-      await _fetchAccount();
+      if (!_selfHost) await _fetchAccount();
       _saveCursors();
       if (changed) _refreshWindow();
       notifyListeners();
@@ -6951,7 +6953,7 @@ class LocalDeskRepo extends ChangeNotifier implements RelicRepo, BillingRepo {
   /// costs nothing here. A failed fetch keeps the last list rather than
   /// flickering the ghost rows away.
   Future<void> _fetchWaiting() async {
-    if ((_remoteAccount?.evictedCount ?? 0) == 0) {
+    if (_selfHost || (_remoteAccount?.evictedCount ?? 0) == 0) {
       _waiting = const [];
       return;
     }

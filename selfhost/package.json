@@ -8,12 +8,18 @@
     "node": ">=22"
   },
   "scripts": {
-    "start": "tsx src/server.ts",
-    "smoke": "tsx test/smoke.ts"
+    "start": "NODE_PATH=node_modules tsx src/server.ts",
+    "smoke": "NODE_PATH=node_modules tsx test/smoke.ts",
+    "test": "NODE_PATH=node_modules tsx test/socket.test.ts"
   },
   "dependencies": {
     "better-sqlite3": "^11.8.0",
     "jose": "^6.2.3",
-    "tsx": "^4.19.2"
+    "tsx": "^4.19.2",
+    "ws": "^8.18.0"
+  },
+  "allowScripts": {
+    "better-sqlite3@11.10.0": true,
+    "esbuild@0.28.2": true
   }
 }

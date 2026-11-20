@@ -15,6 +15,8 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
+import { WebSocketServer } from "ws";
+import { addSocket, broadcast, resolveToken } from "./sockets";
 
 // The unchanged production worker. Its default export is { fetch, queue,
 // scheduled }. The worker package has no "type":"module", so tsx loads it as
@@ -115,6 +117,21 @@ const server = http.createServer(async (nreq, nres) => {
         ? await handleEnroll(request, db)
         : await worker.fetch(request, env);
 
+    if (response.status >= 200 && response.status < 300) {
+      const method = request.method;
+      if (
+        (method === "PUT" && pathname.match(/^\/relic\/[A-Za-z0-9-]+$/)) ||
+        (method === "DELETE" && pathname.match(/^\/relic\/[A-Za-z0-9-]+$/)) ||
+        (method === "PUT" && pathname.match(/^\/ai\/[A-Za-z0-9-]+$/))
+      ) {
+        const auth = nreq.headers["authorization"];
+        if (auth && auth.startsWith("Bearer ")) {
+          const resolved = resolveToken(db, auth.slice(7));
+          if (resolved) broadcast(resolved.accountId);
+        }
+      }
+    }
+
     await writeResponse(response, nres);
   } catch (e) {
     console.error("[relic] request error:", e);
@@ -124,6 +141,34 @@ const server = http.createServer(async (nreq, nres) => {
     }
     nres.end(JSON.stringify({ error: "internal", message: String(e) }));
   }
+});
+
+const wss = new WebSocketServer({ noServer: true });
+
+server.on("upgrade", (req, socket, head) => {
+  const url = new URL("http://localhost" + (req.url || "/"));
+  if (url.pathname !== "/sync/socket") {
+    socket.destroy();
+    return;
+  }
+
+  const auth = req.headers["authorization"];
+  if (!auth || !auth.startsWith("Bearer ")) {
+    socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+    socket.destroy();
+    return;
+  }
+
+  const resolved = resolveToken(db, auth.slice(7));
+  if (!resolved) {
+    socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+    socket.destroy();
+    return;
+  }
+
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    addSocket(resolved.accountId, ws);
+  });
 });
 
 const PORT = Number(process.env.PORT || 8787);
