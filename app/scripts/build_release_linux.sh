@@ -56,11 +56,17 @@ if [[ -z "$ORT_SO" && "$SKIP_SIFT" == "0" ]]; then
   ORT_CACHE="$ROOT/target/ort-linux-x64-$ORT_VERSION"
   ORT_SO="$ORT_CACHE/onnxruntime-linux-x64-$ORT_VERSION/lib/libonnxruntime.so.$ORT_VERSION"
   if [[ ! -f "$ORT_SO" ]]; then
-    echo "==> fetching onnxruntime $ORT_VERSION (linux-x64)"
-    mkdir -p "$ORT_CACHE"
-    curl -fsSL -o "$ORT_CACHE/ort.tgz" \
-      "https://github.com/microsoft/onnxruntime/releases/download/v$ORT_VERSION/onnxruntime-linux-x64-$ORT_VERSION.tgz"
-    tar -xzf "$ORT_CACHE/ort.tgz" -C "$ORT_CACHE"
+    echo "==> fetching onnxruntime $ORT_VERSION wheel from PyPI"
+    mkdir -p "$ORT_CACHE/extracted"
+    mkdir -p "$(dirname "$ORT_SO")"
+    python3 -m pip download --only-binary=:all: --no-deps -d "$ORT_CACHE" "onnxruntime==$ORT_VERSION"
+    unzip -q -o "$ORT_CACHE"/*.whl -d "$ORT_CACHE/extracted"
+    FOUND_SO=$(find "$ORT_CACHE/extracted" -name "libonnxruntime.so*" | head -n1)
+    if [[ -z "$FOUND_SO" ]]; then
+      echo "could not find libonnxruntime.so in onnxruntime wheel" >&2
+      exit 1
+    fi
+    cp "$FOUND_SO" "$ORT_SO"
   fi
 fi
 

@@ -106,7 +106,7 @@ class _ConnectDialogState extends State<_ConnectDialog> {
   void _next() {
     if (_cloud) {
       Navigator.of(context).pop();
-      widget.onCloud();
+      widget.onCloud?.call();
     } else {
       setState(() {
         _step = 1;

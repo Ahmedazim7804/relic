@@ -587,7 +587,7 @@ class _DesktopOnboardingState extends State<DesktopOnboarding> {
     decoration: BoxDecoration(
       color: danger ? c.dangerBg : c.panel,
       borderRadius: BorderRadius.circular(Radii.input),
-      border: Border.all(color: danger ? c.dangerBorder : c.border),
+      border: Border.all(color: danger ? c.danger : c.border),
     ),
     child: Text(
       msg,
@@ -602,9 +602,7 @@ class _DesktopOnboardingState extends State<DesktopOnboarding> {
     padding: const EdgeInsets.only(top: Insets.md),
     child: PrimaryButton(
       label: label,
-      size: 38,
-      fontSize: 13,
-      bold: true,
+      height: 38,
       onTap: onTap,
     ),
   );
@@ -615,7 +613,7 @@ class _DesktopOnboardingState extends State<DesktopOnboarding> {
       label: label,
       size: 34,
       fontSize: 12.5,
-      style: GhostStyle.soft,
+      style: GhostStyle.ghost,
       onTap: onTap,
     ),
   );
