@@ -54,13 +54,34 @@ echo "==> Relic $VER (linux-x64)"
 ORT_VERSION="1.24.2"
 if [[ -z "$ORT_SO" && "$SKIP_SIFT" == "0" ]]; then
   ORT_CACHE="$ROOT/target/ort-linux-x64-$ORT_VERSION"
-  ORT_SO="$ORT_CACHE/onnxruntime-linux-x64-$ORT_VERSION/lib/libonnxruntime.so.$ORT_VERSION"
+  ORT_SO="$ORT_CACHE/libonnxruntime.so.$ORT_VERSION"
   if [[ ! -f "$ORT_SO" ]]; then
     echo "==> fetching onnxruntime $ORT_VERSION (linux-x64)"
     mkdir -p "$ORT_CACHE"
-    curl -fsSL -o "$ORT_CACHE/ort.tgz" \
-      "https://github.com/microsoft/onnxruntime/releases/download/v$ORT_VERSION/onnxruntime-linux-x64-$ORT_VERSION.tgz"
-    tar -xzf "$ORT_CACHE/ort.tgz" -C "$ORT_CACHE"
+    rm -f "$ORT_CACHE"/*.whl
+    python3 -m pip download --only-binary=:all: --no-deps \
+      --dest "$ORT_CACHE" "onnxruntime==$ORT_VERSION"
+    python3 - "$ORT_CACHE" "$ORT_SO" "$ORT_VERSION" <<'PY'
+import glob
+import sys
+import zipfile
+
+wheel = glob.glob(sys.argv[1] + "/*.whl")
+if len(wheel) != 1:
+    raise SystemExit("expected exactly one ONNX Runtime wheel")
+
+with zipfile.ZipFile(wheel[0]) as archive:
+    member = next(
+        (name for name in archive.namelist()
+         if name.endswith("/libonnxruntime.so." + sys.argv[3])),
+        None,
+    )
+    if member is None:
+        raise SystemExit("ONNX Runtime wheel has no versioned shared library")
+    with archive.open(member) as source, open(sys.argv[2], "wb") as target:
+        while chunk := source.read(1024 * 1024):
+            target.write(chunk)
+PY
   fi
 fi
 
